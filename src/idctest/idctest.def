@@ -1,0 +1,17 @@
+library idctest
+Description '$@#thi.guten:1.0.0#@##1## 2012/05/09 13:48:27      ECSINTEL::::00::@@AHCI IDC Test Driver'
+protmode
+
+segments
+  DEVHDR        CLASS 'DATA'
+  _DATA         CLASS 'DATA'
+  CONST         CLASS 'CONST'
+  _BSS          CLASS 'BSS'
+  c_common      CLASS 'BSS'
+  _z_data       CLASS 'BSS'
+  _TEXT         CLASS 'CODE' IOPL
+  'CODE'        CLASS 'CODE' IOPL
+  RMCode        CLASS 'CODE' IOPL
+  LIBCODE       CLASS 'CODE' IOPL
+  _z_text       CLASS 'CODE' IOPL
+

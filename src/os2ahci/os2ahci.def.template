@@ -1,0 +1,16 @@
+library os2ahci
+protmode
+
+segments
+  'DEVHDR'      CLASS 'DATA'
+  '_DATA'       CLASS 'DATA'
+  'LIBDATA'     CLASS 'DATA'
+  'CONST'       CLASS 'CONST'
+  '_BSS'        CLASS 'BSS'
+  'c_common'    CLASS 'BSS'
+  '_z_data'     CLASS 'BSS'
+  '_TEXT'       CLASS 'CODE' IOPL
+  'CODE'        CLASS 'CODE' IOPL
+  'LIBCODE'     CLASS 'CODE' IOPL
+  'RMCode'      CLASS 'CODE' IOPL
+  '_z_text'     CLASS 'CODE' IOPL
