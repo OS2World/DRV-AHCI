@@ -4,7 +4,7 @@ AHCI driver for OS/2-eCS
 
 LICENSE
 ===============
-* GNU GPL V2
+* GNU GPL V3
 
 COMPILE TOOLS
 ===============
