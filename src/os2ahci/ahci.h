@@ -3,6 +3,7 @@
  *
  * Copyright (c) 2011 thi.guten Software Development
  * Copyright (c) 2011 Mensys B.V.
+ * Copyright (c) 2013-2018 David Azarewicz
  *
  * Authors: Christian Mueller, Markus Thielen
  *
@@ -57,14 +58,16 @@
  */
 #define AHCI_PCI_BAR            5
 #define AHCI_MAX_PORTS          16 /* Spec says 32, but we only support 16 */
-#define AHCI_MAX_DEVS           8
+#define AHCI_MAX_DEVS           1 /* was 8. we only support 1 drive per port */
 #define AHCI_MAX_SG             48 /* hardware max is 64K */
 #define AHCI_MAX_SG_ELEMENT_LEN (1UL << 22)
 #define AHCI_MAX_CMDS           32
 #define AHCI_RX_FIS_SZ          256
+#define AHCI_DEV_NAME_LEN       40
 
 /* port-specific DMA scratch buffer aligned to 1024 bytes */
-#define AHCI_PORT_PRIV_DMA_SZ   (((sizeof(AHCI_PORT_DMA) + 1023U) / 1024U) * 1024U)
+//DAZ #define AHCI_PORT_PRIV_DMA_SZ   (((sizeof(AHCI_PORT_DMA) + 1023U) / 1024U) * 1024U)
+#define AHCI_PORT_PRIV_DMA_SZ   sizeof(AHCI_PORT_DMA)
 
 #define AHCI_IRQ_ON_SG          (1UL << 31)
 #define AHCI_CMD_ATAPI          (1UL << 5)

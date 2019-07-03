@@ -3,6 +3,7 @@
  *
  * Copyright (c) 2011 thi.guten Software Development
  * Copyright (c) 2011 Mensys B.V.
+ * Copyright (c) 2013-2018 David Azarewicz
  *
  * Authors: Christian Mueller, Markus Thielen
  *
@@ -165,12 +166,12 @@ typedef struct _ATAPI_CDB_12 {
 
 /* -------------------------- function prototypes -------------------------- */
 
-extern int     atapi_get_geometry     (IORBH _far *iorb, int slot);
-extern int     atapi_unit_ready       (IORBH _far *iorb, int slot);
-extern int     atapi_read             (IORBH _far *iorb, int slot);
-extern int     atapi_read_unaligned   (IORBH _far *iorb, int slot);
-extern int     atapi_verify           (IORBH _far *iorb, int slot);
-extern int     atapi_write            (IORBH _far *iorb, int slot);
-extern int     atapi_execute_cdb      (IORBH _far *iorb, int slot);
-extern int     atapi_req_sense        (IORBH _far *iorb, int slot);
+extern int atapi_get_geometry(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot);
+extern int atapi_unit_ready(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot);
+extern int atapi_read(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot);
+extern int atapi_read_unaligned(IORBH *pIorb, int slot);
+extern int atapi_verify(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot);
+extern int atapi_write(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot);
+extern int atapi_execute_cdb(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot);
+extern int atapi_req_sense(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot);
 

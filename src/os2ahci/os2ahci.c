@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2011 thi.guten Software Development
  * Copyright (c) 2011 Mensys B.V.
- * Copyright (c) 2013 David Azarewicz
+ * Copyright (c) 2013-2018 David Azarewicz
  *
  * Authors: Christian Mueller, Markus Thielen
  *
@@ -28,33 +28,9 @@
 #include "os2ahci.h"
 #include "ioctl.h"
 #include "version.h"
+#include "devhdr.h"
 
 /* -------------------------- macros and constants ------------------------- */
-
-/* parse integer command line parameter */
-#define drv_parm_int(s, value, type, radix)                         \
-  {                                                                 \
-    char _far *_ep;                                                 \
-    if ((s)[1] != ':') {                                            \
-      cprintf("%s: missing colon (:) after /%c\n", drv_name, *(s)); \
-      goto init_fail;                                               \
-    }                                                               \
-    value = (type) strtol((s) + 2,                                  \
-                          (const char _far* _far*) &_ep,            \
-                          radix);                                   \
-    s = _ep;                                                        \
-  }
-
-#define drv_parm_int_optional(s, value, type, radix) \
-  { \
-    char _far *_ep; \
-    if ((s)[1] == ':') { \
-      value = (type) strtol((s) + 2, (const char _far* _far*) &_ep, radix); \
-      s = _ep; \
-    } else { \
-      value++; \
-    } \
-  }
 
 /* set two-dimensional array of port options */
 #define set_port_option(opt, val)                         \
@@ -69,10 +45,6 @@
     opt[adapter_index][port_index] = val;                 \
   }
 
-/* constants for undefined kernel exit routine;
- * see register_krnl_exit() func */
-#define DevHlp_RegisterKrnlExit   0x006f
-
 #define FLAG_KRNL_EXIT_ADD        0x1000
 #define FLAG_KRNL_EXIT_REMOVE     0x2000
 
@@ -86,67 +58,53 @@
 
 /* -------------------------- function prototypes -------------------------- */
 
-void _cdecl  small_code_        (void);
-
-static int   add_unit_info      (IORB_CONFIGURATION _far *iorb_conf, int dt_ai,
-                                 int a, int p, int d, int scsi_id);
-
-static void  register_krnl_exit (void);
+extern int SetPsdPutc(void);
+static int add_unit_info(IORB_CONFIGURATION *iorb_conf, int dt_ai, int a, int p, int d, int scsi_id);
 
 /* ------------------------ global/static variables ------------------------ */
+int thorough_scan = 1; /* if != 0, perform thorough PCI scan */
+int init_reset = 1;    /* if != 0, reset ports during init */
+int force_write_cache; /* if != 0, force write cache */
+int verbosity = 0;     /* default is quiet. 1=show sign on banner, >1=show adapter info during boot */
+int use_mbr_test = 1;
+long com_baud = 0;
 
-int             debug = 0;         /* if > 0, print debug messages to COM1 */
-int             thorough_scan = 1; /* if != 0, perform thorough PCI scan */
-int             init_reset = 1;    /* if != 0, reset ports during init */
-int             force_write_cache; /* if != 0, force write cache */
-int             verbosity = 0;     /* default is quiet. 1=show sign on banner, >1=show adapter info during boot */
-int             use_lvm_info = 1;
-int             wrap_trace_buffer = 0;
-long            com_baud = 0;
-
-PFN             Device_Help = 0;   /* pointer to device helper entry point */
-ULONG           RMFlags = 0;       /* required by resource manager library */
-PFN             RM_Help0 = NULL;   /* required by resource manager library */
-PFN             RM_Help3 = NULL;   /* required by resource manager library */
-HDRIVER         rm_drvh;           /* resource manager driver handle */
-char            rm_drvname[80];    /* driver name as returned by RM */
-USHORT          add_handle;        /* driver handle (RegisterDeviceClass) */
-UCHAR           timer_pool[TIMER_POOL_SIZE]; /* timer pool */
-char            drv_name[] = "OS2AHCI"; /* driver name as string */
+HDRIVER rm_drvh;           /* resource manager driver handle */
+USHORT add_handle;        /* driver handle (RegisterDeviceClass) */
+char drv_name[] = "OS2AHCI"; /* driver name as string */
 
 /* resource manager driver information structure */
-DRIVERSTRUCT rm_drvinfo = {
-  drv_name,                        /* driver name */
-  "AHCI SATA Driver",              /* driver description */
-  DVENDOR,                         /* vendor name */
-  CMVERSION_MAJOR,                 /* RM interface version major */
-  CMVERSION_MINOR,                 /* RM interface version minor */
-  BLD_YEAR, BLD_MONTH, BLD_DAY,    /* date */
-  0,                               /* driver flags */
-  DRT_ADDDM,                       /* driver type */
-  DRS_ADD,                         /* driver sub type */
-  NULL                             /* driver callback */
+static DRIVERSTRUCT rm_drvinfo =
+{
+  NULL, /* We cannot do Flat to Far16 conversion at compile time */
+  NULL, /* so we put NULLs in all the Far16 fields and then fill */
+  NULL, /* them in at run time                                   */
+  DMAJOR,
+  DMINOR,
+  BLD_YEAR, BLD_MONTH, BLD_DAY,
+  0,
+  DRT_ADDDM,
+  DRS_ADD,
+  NULL
 };
 
-ULONG           drv_lock;          /* driver-level spinlock */
-IORB_QUEUE      driver_queue;      /* driver-level IORB queue */
-AD_INFO         ad_infos[MAX_AD];  /* adapter information list */
-int             ad_info_cnt;       /* number of entries in ad_infos[] */
-u16             ad_ignore;         /* bitmap with adapter indexes to ignore */
-int             init_complete;     /* if != 0, initialization has completed */
-int             suspended;
-int             resume_sleep_flag;
+SpinLock_t drv_lock;          /* driver-level spinlock */
+IORB_QUEUE driver_queue;      /* driver-level IORB queue */
+AD_INFO ad_infos[MAX_AD];  /* adapter information list */
+int ad_info_cnt;       /* number of entries in ad_infos[] */
+u16 ad_ignore;         /* bitmap with adapter indexes to ignore */
+int init_complete;     /* if != 0, initialization has completed */
+int suspended;
+int resume_sleep_flag;
 
 /* apapter/port-specific options saved when parsing the command line */
-u8              emulate_scsi[MAX_AD][AHCI_MAX_PORTS];
-u8              enable_ncq[MAX_AD][AHCI_MAX_PORTS];
-u8              link_speed[MAX_AD][AHCI_MAX_PORTS];
-u8              link_power[MAX_AD][AHCI_MAX_PORTS];
-u8              track_size[MAX_AD][AHCI_MAX_PORTS];
-u8              port_ignore[MAX_AD][AHCI_MAX_PORTS];
+u8 emulate_scsi[MAX_AD][AHCI_MAX_PORTS];
+u8 enable_ncq[MAX_AD][AHCI_MAX_PORTS];
+u8 link_speed[MAX_AD][AHCI_MAX_PORTS];
+u8 link_power[MAX_AD][AHCI_MAX_PORTS];
+u8 track_size[MAX_AD][AHCI_MAX_PORTS];
+u8 port_ignore[MAX_AD][AHCI_MAX_PORTS];
 
-static char     init_msg[] = "%s driver version %d.%02d\n";
-static char     exit_msg[] = "%s driver *not* installed\n";
 char BldLevel[] = BLDLEVEL;
 
 /* ----------------------------- start of code ----------------------------- */
@@ -157,275 +115,323 @@ char BldLevel[] = BLDLEVEL;
  * NOTE: this is also used as the IDC entry point. We expect an IOCTL request
  *       packet for IDC calls, so they can be handled by gen_ioctl.
  */
-USHORT _cdecl c_strat(RPH _far *req)
+void StrategyHandler(REQPACKET *prp)
 {
   u16 rc;
 
-  switch (req->Cmd) {
-
-  case CMDInitBase:
-    rc = init_drv((RPINITIN _far *) req);
+  switch (prp->bCommand)
+  {
+  case STRATEGY_BASEDEVINIT:
+    rc = init_drv(prp);
     break;
 
-  case CMDShutdown:
-    rc = exit_drv(((RPSAVERESTORE _far *) req)->FuncCode);
+  case STRATEGY_SHUTDOWN:
+    rc = exit_drv(prp->save_restore.Function);
     break;
 
-  case CMDGenIOCTL:
-    rc = gen_ioctl((RP_GENIOCTL _far *) req);
+  case STRATEGY_GENIOCTL:
+    rc = gen_ioctl(prp);
     break;
 
-  case CMDOpen:
-    build_user_info(1);
-    rc = STDON;
+  case STRATEGY_OPEN:
+    build_user_info();
+    rc = RPDONE;
     break;
 
-  case CMDINPUT:
-    rc = char_dev_input((RP_RWV _far *) req);
+  case STRATEGY_READ:
+    rc = char_dev_input(prp);
     break;
 
-  case CMDSaveRestore:
-    rc = sr_drv(((RPSAVERESTORE _far *) req)->FuncCode);
+  case STRATEGY_SAVERESTORE:
+    rc = sr_drv(prp->save_restore.Function);
     break;
 
-  case CMDClose:
-  case CMDInputS:
-  case CMDInputF:
+  case STRATEGY_INITCOMPLETE:
+  case STRATEGY_CLOSE:
+  case STRATEGY_INPUTSTATUS:
+  case STRATEGY_FLUSHINPUT:
     /* noop */
-    rc = STDON;
+    rc = RPDONE;
     break;
 
   default:
-    rc = STDON | STATUS_ERR_UNKCMD;
+    rc = RPDONE | RPERR_BADCOMMAND;
     break;
   }
 
-  return(rc);
+  prp->usStatus = rc;
+}
+
+void IdcHandler(REQPACKET *prp)
+{
+  StrategyHandler(prp);
 }
 
 /******************************************************************************
  * Intialize the os2ahci driver. This includes command line parsing, scanning
  * the PCI bus for supported AHCI adapters, etc.
  */
-USHORT init_drv(RPINITIN _far *req)
+USHORT init_drv(REQPACKET *req)
 {
   static int init_drv_called;
   static int init_drv_failed;
-  RPINITOUT _far *rsp = (RPINITOUT _far *) req;
-  DDD_PARM_LIST _far *ddd_pl = (DDD_PARM_LIST _far *) req->InitArgs;
   APIRET rmrc;
-  char _far *cmd_line;
-  char _far *s;
+  const char *pszCmdLine, *cmd_line;
   int adapter_index = -1;
   int port_index = -1;
-  int invert_option;
-  int optval;
-  u16 vendor;
-  u16 device;
+  int iInvertOption;
+  int iStatus;
 
-  if (init_drv_called) {
-    /* This is the init call for the second (legacy IBMS506$) character
+  if (init_drv_called)
+  {
+    /* This is the init call for the second (IBMS506$) character
      * device driver. If the main driver failed initialization, fail this
      * one as well.
      */
-    rsp->CodeEnd = (u16) end_of_code;
-    rsp->DataEnd = (u16) &end_of_data;
-    return(STDON | ((init_drv_failed) ? ERROR_I24_QUIET_INIT_FAIL : 0));
+    return(RPDONE | ((init_drv_failed) ? RPERR_INITFAIL : 0));
   }
+  D32g_DbgLevel = 0;
   init_drv_called = 1;
   suspended = 0;
   resume_sleep_flag = 0;
   memset(ad_infos, 0, sizeof(ad_infos));
   memset(emulate_scsi, 1, sizeof(emulate_scsi)); /* set default enabled */
-
-  /* set device helper entry point */
-  Device_Help = req->DevHlpEP;
+  UtSetDriverName("OS2AHCI$");
+  Header.ulCaps |= DEV_ADAPTER_DD; /* DAZ This flag is not really needed. */
 
   /* create driver-level spinlock */
-  DevHelp_CreateSpinLock(&drv_lock);
-
-  /* initialize libc code */
-  init_libc();
+  KernAllocSpinLock(&drv_lock);
 
   /* register driver with resource manager */
-  if ((rmrc = RMCreateDriver(&rm_drvinfo, &rm_drvh)) != RMRC_SUCCESS) {
-    cprintf("%s: failed to register driver with resource manager (rc = %d)\n",
-            drv_name, rmrc);
+  rm_drvinfo.DrvrName = drv_name;
+  rm_drvinfo.DrvrDescript = "AHCI SATA Driver";
+  rm_drvinfo.VendorName = DVENDOR;
+  if ((rmrc = RMCreateDriver(&rm_drvinfo, &rm_drvh)) != RMRC_SUCCESS)
+  {
+    iprintf("%s: failed to register driver with resource manager (rc = %d)", drv_name, rmrc);
     goto init_fail;
   }
 
-  /* parse command line parameters */
-  cmd_line = (char _far *) ((u32) ddd_pl & 0xffff0000l) + ddd_pl->cmd_line_args;
+  pszCmdLine = cmd_line = req->init_in.szArgs;
+  iStatus = 0;
+  while (*pszCmdLine)
+  {
+    if (*pszCmdLine++ != '/') continue; /* Ignore anything that doesn't start with '/' */
+    /* pszCmdLine now points to first char of argument */
 
-  for (s = cmd_line; *s != 0; s++) {
-    if (*s == '/') {
-      if ((invert_option = (s[1] == '!')) != 0) {
-        s++;
-      }
-      s++;
-      switch (tolower(*s)) {
+    if ((iInvertOption = (*pszCmdLine == '!')) != 0) pszCmdLine++;
 
-      case '\0':
-        /* end of command line; can only happen if command line is incorrect */
-        cprintf("%s: incomplete command line option\n", drv_name);
-        goto init_fail;
-
-      case 'b':
-        drv_parm_int(s, com_baud, u32, 10);
-        break;
-
-      case 'c':
-        /* set COM port base address for debug messages */
-        drv_parm_int(s, com_base, u16, 16);
-        if (com_base == 1) com_base = 0x3f8;
-        if (com_base == 2) com_base = 0x2f8;
-        break;
-
-      case 'd':
-        /* increase debug level */
-        drv_parm_int_optional(s, debug, int, 10);
-        break;
-
-      case 'g':
-        /* add specfied PCI ID as a supported generic AHCI adapter  */
-        drv_parm_int(s, vendor, u16, 16);
-        s--;
-        drv_parm_int(s, device, u16, 16);
-        if (add_pci_id(vendor, device)) {
-          cprintf("%s: failed to add PCI ID %04x:%04x\n", drv_name, vendor, device);
-          goto init_fail;
-        }
-        thorough_scan = 1;
-        break;
-
-      case 't':
-        /* perform thorough PCI scan (i.e. look for individual supported PCI IDs) */
-        thorough_scan = !invert_option;
-        break;
-
-      case 'r':
-        /* reset ports during initialization */
-        init_reset = !invert_option;
-        break;
-
-      case 'f':
-        /* force write cache regardless of IORB flags */
-        force_write_cache = 1;
-        break;
-
-      case 'a':
-        /* set adapter index for adapter and port-related options */
-        drv_parm_int(s, adapter_index, int, 10);
-        if (adapter_index < 0 || adapter_index >= MAX_AD) {
-          cprintf("%s: invalid adapter index (%d)\n", drv_name, adapter_index);
-          goto init_fail;
-        }
-        break;
-
-      case 'p':
-        /* set port index for port-related options */
-        drv_parm_int(s, port_index, int, 10);
-        if (port_index < 0 || port_index >= AHCI_MAX_PORTS) {
-          cprintf("%s: invalid port index (%d)\n", drv_name, port_index);
-          goto init_fail;
-        }
-        break;
-
-      case 'i':
-        /* ignore current adapter index */
-        if (adapter_index >= 0) {
-          if (port_index >= 0) port_ignore[adapter_index][port_index] = !invert_option;
-          else ad_ignore |= 1U << adapter_index;
-        }
-        break;
-
-      case 's':
-        /* enable SCSI emulation for ATAPI devices */
-        set_port_option(emulate_scsi, !invert_option);
-        break;
-
-      case 'n':
-        /* enable NCQ */
-        set_port_option(enable_ncq, !invert_option);
-        break;
-
-      case 'l':
-        /* set link speed or power savings */
-        s++;
-        switch (tolower(*s)) {
-        case 's':
-          /* set link speed */
-          drv_parm_int(s, optval, int, 10);
-          set_port_option(link_speed, optval);
-          break;
-        case 'p':
-          /* set power management */
-          drv_parm_int(s, optval, int, 10);
-          set_port_option(link_power, optval);
-          break;
-        default:
-          cprintf("%s: invalid link parameter (%c)\n", drv_name, *s);
-          goto init_fail;
-        }
-        /* need to reset the port in order to establish link settings */
-        init_reset = 1;
-        break;
-
-      case '4':
-        /* enable 4K sector geometry enhancement (track size = 56) */
-        if (!invert_option) {
-          set_port_option(track_size, 56);
-        }
-        break;
-
-      case 'z':
-        /* Specify to not use the LVM information. There is no reason why anyone would
-         * want to do this, but previous versions of this driver did not have LVM capability,
-         * so this switch is here temporarily just in case.
-         */
-        use_lvm_info = !invert_option;
-        break;
-
-      case 'v':
-        /* be verbose during boot */
-        drv_parm_int_optional(s, verbosity, int, 10);
-        break;
-
-      case 'w':
-        /* Specify to allow the trace buffer to wrap when full. */
-        wrap_trace_buffer = !invert_option;
-        break;
-
-      case 'q':
-        /* Temporarily output a non-fatal message to get anyone using this
-         * undocumented switch to stop using it. This will be removed soon
-         * and the error will become fatal.
-         */
-        cprintf("%s: unknown option: /%c\n", drv_name, *s);
-        break;
-
-      default:
-        cprintf("%s: unknown option: /%c\n", drv_name, *s);
-        goto init_fail;
-      }
+    if (ArgCmp(pszCmdLine, "B:"))
+    {
+      pszCmdLine += 2;
+      com_baud = strtol(pszCmdLine, &pszCmdLine, 0);
+      continue;
     }
+
+    if (ArgCmp(pszCmdLine, "C:"))
+    {
+      pszCmdLine += 2;
+      /* set COM port base address for debug messages */
+      D32g_ComBase = strtol(pszCmdLine, &pszCmdLine, 0);
+      if (D32g_ComBase == 1) D32g_ComBase = 0x3f8;
+      if (D32g_ComBase == 2) D32g_ComBase = 0x2f8;
+      continue;
+    }
+
+    if (ArgCmp(pszCmdLine, "D"))
+    {
+      pszCmdLine++;
+      if (*pszCmdLine == ':')
+      {
+        pszCmdLine++;
+        D32g_DbgLevel = strtol(pszCmdLine, &pszCmdLine, 0);
+      }
+      else D32g_DbgLevel++; /* increase debug level */
+      continue;
+    }
+
+    if (ArgCmp(pszCmdLine, "G:"))
+    {
+      u16 usVendor;
+      u16 usDevice;
+
+      pszCmdLine += 2;
+      /* add specfied PCI ID as a supported generic AHCI adapter  */
+      usVendor = strtol(pszCmdLine, &pszCmdLine, 16);
+      if (*pszCmdLine != ':') break;
+      pszCmdLine++;
+      usDevice = strtol(pszCmdLine, &pszCmdLine, 16);
+      if (add_pci_id(usVendor, usDevice))
+      {
+        iprintf("%s: failed to add PCI ID %04x:%04x", drv_name, usVendor, usDevice);
+        iStatus = 1;
+      }
+      thorough_scan = 1;
+      continue;
+    }
+
+    if (ArgCmp(pszCmdLine, "T"))
+    {
+      pszCmdLine++;
+      /* perform thorough PCI scan (i.e. look for individual supported PCI IDs) */
+      thorough_scan = !iInvertOption;
+      continue;
+    }
+
+    if (ArgCmp(pszCmdLine, "R"))
+    {
+      pszCmdLine++;
+      /* reset ports during initialization */
+      init_reset = !iInvertOption;
+      continue;
+    }
+
+    if (ArgCmp(pszCmdLine, "F"))
+    {
+      pszCmdLine++;
+      /* force write cache regardless of IORB flags */
+      force_write_cache = 1;
+      continue;
+    }
+
+    if (ArgCmp(pszCmdLine, "A:"))
+    {
+      pszCmdLine += 2;
+      /* set adapter index for adapter and port-related options */
+      adapter_index = strtol(pszCmdLine, &pszCmdLine, 0);
+      if (adapter_index < 0 || adapter_index >= MAX_AD)
+      {
+        iprintf("%s: invalid adapter index (%d)", drv_name, adapter_index);
+        iStatus = 1;
+      }
+      continue;
+    }
+
+    if (ArgCmp(pszCmdLine, "P:"))
+    {
+      pszCmdLine += 2;
+      /* set port index for port-related options */
+      port_index = strtol(pszCmdLine, &pszCmdLine, 0);
+      if (port_index < 0 || port_index >= AHCI_MAX_PORTS)
+      {
+        iprintf("%s: invalid port index (%d)", drv_name, port_index);
+        iStatus = 1;
+      }
+      continue;
+    }
+
+    if (ArgCmp(pszCmdLine, "I"))
+    {
+      pszCmdLine++;
+      /* ignore current adapter index */
+      if (adapter_index >= 0)
+      {
+        if (port_index >= 0) port_ignore[adapter_index][port_index] = !iInvertOption;
+        else ad_ignore |= 1U << adapter_index;
+      }
+      continue;
+    }
+
+    if (ArgCmp(pszCmdLine, "S"))
+    {
+      pszCmdLine++;
+      /* enable SCSI emulation for ATAPI devices */
+      set_port_option(emulate_scsi, !iInvertOption);
+      continue;
+    }
+
+    if (ArgCmp(pszCmdLine, "N"))
+    {
+      pszCmdLine++;
+      /* enable NCQ */
+      set_port_option(enable_ncq, !iInvertOption);
+      continue;
+    }
+
+    if (ArgCmp(pszCmdLine, "LS:"))
+    {
+      int optval;
+
+      pszCmdLine += 3;
+      /* set link speed */
+      optval = strtol(pszCmdLine, &pszCmdLine, 0);
+      set_port_option(link_speed, optval);
+      /* need to reset the port in order to establish link settings */
+      init_reset = 1;
+      continue;
+    }
+
+    if (ArgCmp(pszCmdLine, "LP:"))
+    {
+      int optval;
+
+      pszCmdLine += 3;
+      /* set power management */
+      optval = strtol(pszCmdLine, &pszCmdLine, 0);
+      set_port_option(link_power, optval);
+      /* need to reset the port in order to establish link settings */
+      init_reset = 1;
+      continue;
+    }
+
+    if (ArgCmp(pszCmdLine, "4"))
+    {
+      pszCmdLine++;
+      /* enable 4K sector geometry enhancement (track size = 56) */
+      if (!iInvertOption) set_port_option(track_size, 56);
+      continue;
+    }
+
+    if (ArgCmp(pszCmdLine, "U"))
+    {
+      pszCmdLine++;
+      /* Specify to use the MBR test to ignore non-MBR disks.
+       * Default is on.
+       */
+      use_mbr_test = !iInvertOption;
+      continue;
+    }
+
+    if (ArgCmp(pszCmdLine, "V"))
+    {
+      pszCmdLine++;
+      if (*pszCmdLine == ':')
+      {
+        pszCmdLine++;
+        verbosity = strtol(pszCmdLine, &pszCmdLine, 0);
+      }
+      else verbosity++; /* increase verbosity level */
+      continue;
+    }
+
+    if (ArgCmp(pszCmdLine, "W"))
+    {
+      pszCmdLine++;
+      /* Specify to allow the trace buffer to wrap when full. */
+      D32g_DbgBufWrap = !iInvertOption;
+      continue;
+    }
+
+    iprintf("Unrecognized switch: %s", pszCmdLine-1);
+    iStatus = 1; /* unrecognized argument */
   }
 
-  if (com_baud) init_com(com_baud); /* initialize com port for debug output */
+  if (iStatus) goto init_fail;
 
-  /* initialize trace buffer if applicable */
-  if (debug > 0 && com_base == 0) {
-    /* debug is on, but COM port is off -> use our trace buffer */
-    trace_init(AHCI_DEBUG_BUF_SIZE);
-  } else {
-    trace_init(AHCI_INFO_BUF_SIZE);
+  if (com_baud) InitComPort(com_baud);
+
+  dprintf(0,"BldLevel: %s\n", BldLevel);
+  dprintf(0,"CmdLine: %s\n", cmd_line);
+  /*
+  if (sizeof(ADD_WORKSPACE) > ADD_WORKSPACE_SIZE)
+  {
+    dprintf(0,"ADD_WORKSPACE size is too big! %d>16\n", sizeof(ADD_WORKSPACE));
+    goto init_fail;
   }
-
-  ntprintf("BldLevel: %s\n", BldLevel);
-  ntprintf("CmdLine: %Fs\n", cmd_line);
+  */
 
   /* print initialization message */
-  ciprintf(init_msg, drv_name, VERSION / 100, VERSION % 100);
+  ciprintf("%s driver version %d.%02d", drv_name, DMAJOR, DMINOR);
 
   #ifdef TESTVER
   #include "testver.c"
@@ -434,54 +440,46 @@ USHORT init_drv(RPINITIN _far *req)
   /* scan PCI bus for supported devices */
   scan_pci_bus();
 
-  if (ad_info_cnt > 0) {
+  if (ad_info_cnt > 0)
+  {
     /* initialization succeeded and we found at least one AHCI adapter */
-    ADD_InitTimer(timer_pool, sizeof(timer_pool));
 
-    if (DevHelp_RegisterDeviceClass(drv_name, (PFN) add_entry, 0, 1, &add_handle)) {
-      cprintf("%s: couldn't register device class\n", drv_name);
+    if (Dev32Help_RegisterDeviceClass(drv_name, add_entry, 0, 1, &add_handle))
+    {
+      iprintf("%s: couldn't register device class", drv_name);
       goto init_fail;
     }
+
+    Timer_InitTimer(TIMER_COUNT);
 
     /* allocate context hooks */
-    if (DevHelp_AllocateCtxHook(mk_NPFN(restart_hook), &restart_ctxhook_h) != 0 ||
-        DevHelp_AllocateCtxHook(mk_NPFN(reset_hook), &reset_ctxhook_h) != 0 ||
-        DevHelp_AllocateCtxHook(mk_NPFN(engine_hook), &engine_ctxhook_h)) {
-      cprintf("%s: failed to allocate task-time context hooks\n", drv_name);
-      goto init_fail;
-    }
-
-    rsp->CodeEnd = (u16) end_of_code;
-    rsp->DataEnd = (u16) &end_of_data;
+    KernAllocateContextHook(restart_ctxhook, 0, &restart_ctxhook_h);
+    KernAllocateContextHook(reset_ctxhook, 0, &reset_ctxhook_h);
+    KernAllocateContextHook(engine_ctxhook, 0, &engine_ctxhook_h);
 
     /* register kernel exit routine for trap dumps */
-    register_krnl_exit();
+    Dev32Help_RegisterKrnlExit(shutdown_driver, FLAG_KRNL_EXIT_ADD, TYPE_KRNL_EXIT_INT13);
 
-    return(STDON);
-
-  } else {
+    return(RPDONE);
+  }
+  else
+  {
     /* no adapters found */
-    ciprintf(" No adapters found.\n");
+    ciprintf("%s: No adapters found.", drv_name);
   }
 
 init_fail:
   /* initialization failed; set segment sizes to 0 and return error */
-  rsp->CodeEnd = 0;
-  rsp->DataEnd = 0;
   init_drv_failed = 1;
 
-  /* free context hooks */
-  if (engine_ctxhook_h != 0)  DevHelp_FreeCtxHook(engine_ctxhook_h);
-  if (reset_ctxhook_h != 0)   DevHelp_FreeCtxHook(reset_ctxhook_h);
-  if (restart_ctxhook_h != 0) DevHelp_FreeCtxHook(restart_ctxhook_h);
-
-  if (rm_drvh != 0) {
+  if (rm_drvh != 0)
+  {
     /* remove driver from resource manager */
     RMDestroyDriver(rm_drvh);
   }
 
-  ciprintf(exit_msg, drv_name);
-  return(STDON | ERROR_I24_QUIET_INIT_FAIL);
+  ciprintf("%s driver *not* installed", drv_name);
+  return(RPDONE | RPERR_INITFAIL);
 }
 
 /******************************************************************************
@@ -490,21 +488,20 @@ init_fail:
  * ring 3 applications. On top of that, some predefined IOCTLs (e.g. SMART
  * commands for ATA disks) are implemented here.
  */
-USHORT gen_ioctl(RP_GENIOCTL _far *ioctl)
+USHORT gen_ioctl(REQPACKET *ioctl)
 {
-  dprintf("IOCTL 0x%x/0x%x\n", (u16) ioctl->Category, (u16) ioctl->Function);
+  DPRINTF(2,"IOCTL 0x%x/0x%x\n", ioctl->ioctl.bCategory, ioctl->ioctl.bFunction);
 
-  switch (ioctl->Category) {
-
+  switch (ioctl->ioctl.bCategory)
+  {
   case OS2AHCI_IOCTL_CATEGORY:
-    switch (ioctl->Function) {
-
+    switch (ioctl->ioctl.bFunction)
+    {
     case OS2AHCI_IOCTL_GET_DEVLIST:
       return(ioctl_get_devlist(ioctl));
 
     case OS2AHCI_IOCTL_PASSTHROUGH:
       return(ioctl_passthrough(ioctl));
-
     }
     break;
 
@@ -513,10 +510,9 @@ USHORT gen_ioctl(RP_GENIOCTL _far *ioctl)
 
   case DSKSP_CAT_SMART:
     return(ioctl_smart(ioctl));
-
   }
 
-  return(STDON | STATUS_ERR_UNKCMD);
+  return(RPDONE | RPERR_BADCOMMAND);
 }
 
 /******************************************************************************
@@ -524,9 +520,19 @@ USHORT gen_ioctl(RP_GENIOCTL _far *ioctl)
  * we return data from the trace buffer; if not, we might return a device
  * dump similar to IBM1S506.ADD/DANIS506.ADD (TODO).
  */
-USHORT char_dev_input(RP_RWV _far *rwrb)
+USHORT char_dev_input(REQPACKET *pPacket)
 {
-  return(trace_char_dev(rwrb));
+  void *LinAdr;
+
+  if (Dev32Help_PhysToLin(pPacket->io.ulAddress, pPacket->io.usCount, &LinAdr))
+  {
+    pPacket->io.usCount = 0;
+    return RPDONE | RPERR_GENERAL;
+  }
+
+  pPacket->io.usCount = dCopyToUser(LinAdr, pPacket->io.usCount);
+
+  return RPDONE;
 }
 
 /******************************************************************************
@@ -541,15 +547,16 @@ USHORT char_dev_input(RP_RWV _far *rwrb)
  */
 USHORT exit_drv(int func)
 {
-  dprintf("exit_drv(%d) called\n", func);
+  DPRINTF(2,"exit_drv(%d) called\n", func);
 
-  if (func == 0) {
+  if (func == 0)
+  {
     /* we're only interested in the second phase of the shutdown */
-    return(STDON);
+    return(RPDONE);
   }
 
   suspend();
-  return(STDON);
+  return(RPDONE);
 }
 
 /******************************************************************************
@@ -558,12 +565,12 @@ USHORT exit_drv(int func)
  */
 USHORT sr_drv(int func)
 {
-  dprintf("sr_drv(%d) called\n", func);
+  DPRINTF(2,"sr_drv(%d) called\n", func);
 
   if (func) resume();
   else suspend();
 
-  return(STDON);
+  return(RPDONE);
 }
 
 /******************************************************************************
@@ -577,51 +584,61 @@ USHORT sr_drv(int func)
  *       established. Refer to the comments in "trigger_engine()" for
  *       details.
  */
-void _cdecl _far _loadds add_entry(IORBH _far *first_iorb)
+void add_entry(IORBH FAR16DATA *vFirstIorb)
 {
-  IORBH _far *iorb;
-  IORBH _far *next = NULL;
+  IORBH FAR16DATA *vIorb;
+  IORBH FAR16DATA *vNext = FAR16NULL;
 
   spin_lock(drv_lock);
 
-  for (iorb = first_iorb; iorb != NULL; iorb = next) {
+  for (vIorb=vFirstIorb; vIorb!=FAR16NULL; vIorb=vNext)
+  {
+    IORBH *pIorb = Far16ToFlat(vIorb);
+
     /* Queue this IORB. Queues primarily exist on port level but there are
      * some requests which affect the whole driver, most notably
      * IOCC_CONFIGURATION. In either case, adding the IORB to the driver or
      * port queue will change the links, thus we need to save the original
-     * link in 'next'.
+     * link in 'vNext'.
      */
-    next = (iorb->RequestControl | IORB_CHAIN) ? iorb->pNxtIORB : 0;
+    if (pIorb->RequestControl & IORB_CHAIN) vNext = pIorb->pNxtIORB;
+    else vNext = (IORBH FAR16DATA *)0;
 
-    iorb->Status = 0;
-    iorb->ErrorCode = 0;
-    memset(&iorb->ADDWorkSpace, 0x00, sizeof(ADD_WORKSPACE));
+    pIorb->Status = 0;
+    pIorb->ErrorCode = 0;
+    memset(&pIorb->ADDWorkSpace, 0x00, sizeof(ADD_WORKSPACE));
 
-    if (iorb_driver_level(iorb)) {
+    #ifdef DEBUG
+    DumpIorb(pIorb); /* DAZ TESTING */
+    #endif
+
+    if (iorb_driver_level(pIorb))
+    {
       /* driver-level IORB */
-      iorb->UnitHandle = 0;
-      iorb_queue_add(&driver_queue, iorb);
-
-    } else {
+      pIorb->UnitHandle = 0;
+      iorb_queue_add(&driver_queue, vIorb, pIorb);
+    }
+    else
+    {
       /* port-level IORB */
-      int a = iorb_unit_adapter(iorb);
-      int p = iorb_unit_port(iorb);
-      int d = iorb_unit_device(iorb);
+      int a = iorb_unit_adapter(pIorb);
+      int p = iorb_unit_port(pIorb);
+      int d = iorb_unit_device(pIorb);
 
       if (a >= ad_info_cnt ||
           p > ad_infos[a].port_max ||
           d > ad_infos[a].ports[p].dev_max ||
-          (ad_infos[a].port_map & (1UL << p)) == 0) {
-
+          (ad_infos[a].port_map & (1UL << p)) == 0)
+      {
         /* unit handle outside of the allowed range */
-        dprintf("warning: IORB for %d.%d.%d out of range\n", a, p, d);
-        iorb->Status = IORB_ERROR;
-        iorb->ErrorCode = IOERR_CMD_SYNTAX;
-        iorb_complete(iorb);
+        dprintf(0,"warning: IORB for %d.%d.%d out of range\n", a, p, d);
+        pIorb->Status = IORB_ERROR;
+        pIorb->ErrorCode = IOERR_CMD_SYNTAX;
+        iorb_complete(vIorb, pIorb);
         continue;
       }
 
-      iorb_queue_add(&ad_infos[a].ports[p].iorb_queue, iorb);
+      iorb_queue_add(&ad_infos[a].ports[p].iorb_queue, vIorb, pIorb);
     }
   }
 
@@ -648,8 +665,10 @@ void trigger_engine(void)
 {
   int i;
 
-  for (i = 0; i < 3 || !init_complete; i++) {
-    if (trigger_engine_1() == 0) {
+  for (i = 0; i < 3 || !init_complete; i++)
+  {
+    if (trigger_engine_1() == 0)
+    {
       /* done -- all IORBs have been sent on their way */
       return;
     }
@@ -658,7 +677,7 @@ void trigger_engine(void)
   /* Something keeps bouncing; hand off to the engine context hook which will
    * keep trying in the background.
    */
-  DevHelp_ArmCtxHook(0, engine_ctxhook_h);
+  KernArmHook(engine_ctxhook_h, 0, 0);
 }
 
 /******************************************************************************
@@ -709,8 +728,9 @@ void trigger_engine(void)
  */
 int trigger_engine_1(void)
 {
-  IORBH _far *iorb;
-  IORBH _far *next;
+  IORBH FAR16DATA *vIorb;
+  IORBH *pIorb;
+  IORBH FAR16DATA *vNext;
   int iorbs_sent = 0;
   int a;
   int p;
@@ -718,25 +738,38 @@ int trigger_engine_1(void)
   iorbs_sent = 0;
 
   /* process driver-level IORBs */
-  if ((iorb = driver_queue.root) != NULL && !add_workspace(iorb)->processing) {
-    send_iorb(iorb);
-    iorbs_sent++;
+  if ((vIorb = driver_queue.vRoot) != FAR16NULL)
+  {
+    pIorb = Far16ToFlat(vIorb);
+
+    if (!add_workspace(pIorb)->processing)
+    {
+      send_iorb(vIorb, pIorb);
+      iorbs_sent++;
+    }
   }
 
   /* process port-level IORBs */
-  for (a = 0; a < ad_info_cnt; a++) {
+  for (a = 0; a < ad_info_cnt; a++)
+  {
     AD_INFO *ai = ad_infos + a;
-    if (ai->busy) {
+    if (ai->busy)
+    {
       /* adapter is busy; don't process any IORBs */
       continue;
     }
-    for (p = 0; p <= ai->port_max; p++) {
+    for (p = 0; p <= ai->port_max; p++)
+    {
       /* send all queued IORBs on this port */
-      next = NULL;
-      for (iorb = ai->ports[p].iorb_queue.root; iorb != NULL; iorb = next) {
-        next = iorb->pNxtIORB;
-        if (!add_workspace(iorb)->processing) {
-          send_iorb(iorb);
+      vNext = FAR16NULL;
+      for (vIorb = ai->ports[p].iorb_queue.vRoot; vIorb != FAR16NULL; vIorb = vNext)
+      {
+        pIorb = Far16ToFlat(vIorb);
+
+        vNext = pIorb->pNxtIORB;
+        if (!add_workspace(pIorb)->processing)
+        {
+          send_iorb(vIorb, pIorb);
           iorbs_sent++;
         }
       }
@@ -754,50 +787,50 @@ int trigger_engine_1(void)
  *       aquired. It will release it before calling any of the handler
  *       functions and re-aquire it when done.
  */
-void send_iorb(IORBH _far *iorb)
+void send_iorb(IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
   /* Mark IORB as "processing" before doing anything else. Once the IORB is
    * marked as "processing", we can release the spinlock because subsequent
    * invocations of trigger_engine() (e.g. at interrupt time) will ignore this
    * IORB.
    */
-  add_workspace(iorb)->processing = 1;
+  add_workspace(pIorb)->processing = 1;
   spin_unlock(drv_lock);
 
-  switch (iorb->CommandCode) {
-
+  switch (pIorb->CommandCode)
+  {
   case IOCC_CONFIGURATION:
-    iocc_configuration(iorb);
+    iocc_configuration(vIorb, pIorb);
     break;
 
   case IOCC_DEVICE_CONTROL:
-    iocc_device_control(iorb);
+    iocc_device_control(vIorb, pIorb);
     break;
 
   case IOCC_UNIT_CONTROL:
-    iocc_unit_control(iorb);
+    iocc_unit_control(vIorb, pIorb);
     break;
 
   case IOCC_GEOMETRY:
-    iocc_geometry(iorb);
+    iocc_geometry(vIorb, pIorb);
     break;
 
   case IOCC_EXECUTE_IO:
-    iocc_execute_io(iorb);
+    iocc_execute_io(vIorb, pIorb);
     break;
 
   case IOCC_UNIT_STATUS:
-    iocc_unit_status(iorb);
+    iocc_unit_status(vIorb, pIorb);
     break;
 
   case IOCC_ADAPTER_PASSTHRU:
-    iocc_adapter_passthru(iorb);
+    iocc_adapter_passthru(vIorb, pIorb);
     break;
 
   default:
     /* unsupported call */
-    iorb_seterr(iorb, IOERR_CMD_NOT_SUPPORTED);
-    iorb_done(iorb);
+    iorb_seterr(pIorb, IOERR_CMD_NOT_SUPPORTED);
+    iorb_done(vIorb, pIorb);
     break;
   }
 
@@ -808,51 +841,51 @@ void send_iorb(IORBH _far *iorb)
 /******************************************************************************
  * Handle IOCC_CONFIGURATION requests.
  */
-void iocc_configuration(IORBH _far *iorb)
+void iocc_configuration(IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
   int a;
 
-  switch (iorb->CommandModifier) {
+  switch (pIorb->CommandModifier)
+  {
 
   case IOCM_COMPLETE_INIT:
     /* Complete initialization. From now on, we won't have to restore the BIOS
      * configuration after each command and we're fully operational (i.e. will
      * use interrupts, timers and context hooks instead of polling).
      */
-    if (!init_complete) {
-      dprintf("leaving initialization mode\n");
-      for (a = 0; a < ad_info_cnt; a++) {
+    if (!init_complete)
+    {
+      DPRINTF(1,"leaving initialization mode\n");
+      for (a = 0; a < ad_info_cnt; a++)
+      {
         lock_adapter(ad_infos + a);
         ahci_complete_init(ad_infos + a);
       }
       init_complete = 1;
 
-      /* DAZ turn off COM port output if on */
-      //com_base = 0;
-
       /* release all adapters */
-      for (a = 0; a < ad_info_cnt; a++) {
+      for (a = 0; a < ad_info_cnt; a++)
+      {
         unlock_adapter(ad_infos + a);
       }
+      DPRINTF(1,"leaving initialization mode 2\n");
 
       #ifdef LEGACY_APM
       /* register APM hook */
       apm_init();
       #endif
-
-      build_user_info(0);
     }
-    iorb_done(iorb);
+    iorb_done(vIorb, pIorb);
     break;
 
   case IOCM_GET_DEVICE_TABLE:
     /* construct a device table */
-    iocm_device_table(iorb);
+    iocm_device_table(vIorb, pIorb);
     break;
 
   default:
-    iorb_seterr(iorb, IOERR_CMD_NOT_SUPPORTED);
-    iorb_done(iorb);
+    iorb_seterr(pIorb, IOERR_CMD_NOT_SUPPORTED);
+    iorb_done(vIorb, pIorb);
     break;
   }
 }
@@ -860,32 +893,36 @@ void iocc_configuration(IORBH _far *iorb)
 /******************************************************************************
  * Handle IOCC_DEVICE_CONTROL requests.
  */
-void iocc_device_control(IORBH _far *iorb)
+void iocc_device_control(IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
-  AD_INFO *ai = ad_infos + iorb_unit_adapter(iorb);
-  IORBH _far *ptr;
-  IORBH _far *next = NULL;
-  int p = iorb_unit_port(iorb);
-  int d = iorb_unit_device(iorb);
+  AD_INFO *ai = ad_infos + iorb_unit_adapter(pIorb);
+  IORBH FAR16DATA *vPtr;
+  IORBH FAR16DATA *vNext = FAR16NULL;
+  int p = iorb_unit_port(pIorb);
+  int d = iorb_unit_device(pIorb);
 
-  switch (iorb->CommandModifier) {
-
+  switch (pIorb->CommandModifier)
+  {
   case IOCM_ABORT:
     /* abort all pending commands on specified port and device */
     spin_lock(drv_lock);
-    for (ptr = ai->ports[p].iorb_queue.root; ptr != NULL; ptr = next) {
-      next = ptr->pNxtIORB;
+    for (vPtr = ai->ports[p].iorb_queue.vRoot; vPtr != FAR16NULL; vPtr = vNext)
+    {
+      IORBH *pPtr = Far16ToFlat(vPtr);
+
+      vNext = pPtr->pNxtIORB;
       /* move all matching IORBs to the abort queue */
-      if (ptr != iorb && iorb_unit_device(ptr) == d) {
-        iorb_queue_del(&ai->ports[p].iorb_queue, ptr);
-        iorb_queue_add(&abort_queue, ptr);
-        ptr->ErrorCode = IOERR_CMD_ABORTED;
+      if (vPtr != vIorb && iorb_unit_device(pPtr) == d)
+      {
+        iorb_queue_del(&ai->ports[p].iorb_queue, vPtr);
+        iorb_queue_add(&abort_queue, vPtr, pPtr);
+        pPtr->ErrorCode = IOERR_CMD_ABORTED;
       }
     }
     spin_unlock(drv_lock);
 
     /* trigger reset context hook which will finish the abort processing */
-    DevHelp_ArmCtxHook(0, reset_ctxhook_h);
+    KernArmHook(reset_ctxhook_h, 0, 0);
     break;
 
   case IOCM_SUSPEND:
@@ -895,7 +932,7 @@ void iocc_device_control(IORBH _far *iorb)
      * entities such as IBMIDECD.FLT. Since os2ahci implements both ATA
      * and ATAPI in the same driver, this won't be required.
      */
-    iorb_seterr(iorb, IOERR_CMD_NOT_SUPPORTED);
+    iorb_seterr(pIorb, IOERR_CMD_NOT_SUPPORTED);
     break;
 
   case IOCM_LOCK_MEDIA:
@@ -903,44 +940,50 @@ void iocc_device_control(IORBH _far *iorb)
   case IOCM_EJECT_MEDIA:
     /* unit control commands to lock, unlock and eject media */
     /* will be supported later... */
-    iorb_seterr(iorb, IOERR_CMD_NOT_SUPPORTED);
+    iorb_seterr(pIorb, IOERR_CMD_NOT_SUPPORTED);
     break;
 
   default:
-    iorb_seterr(iorb, IOERR_CMD_NOT_SUPPORTED);
+    iorb_seterr(pIorb, IOERR_CMD_NOT_SUPPORTED);
     break;
   }
 
-  iorb_done(iorb);
+  iorb_done(vIorb, pIorb);
 }
 
 /******************************************************************************
  * Handle IOCC_UNIT_CONTROL requests.
  */
-void iocc_unit_control(IORBH _far *iorb)
+void iocc_unit_control(IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
-  IORB_UNIT_CONTROL _far *iorb_uc = (IORB_UNIT_CONTROL _far *) iorb;
-  int a = iorb_unit_adapter(iorb);
-  int p = iorb_unit_port(iorb);
-  int d = iorb_unit_device(iorb);
+  IORB_UNIT_CONTROL *pIorb_uc = (IORB_UNIT_CONTROL *)pIorb;
+  int a = iorb_unit_adapter(pIorb);
+  int p = iorb_unit_port(pIorb);
+  int d = iorb_unit_device(pIorb);
 
   spin_lock(drv_lock);
-  switch (iorb->CommandModifier) {
-
+  switch (pIorb->CommandModifier)
+  {
   case IOCM_ALLOCATE_UNIT:
     /* allocate unit for exclusive access */
-    if (ad_infos[a].ports[p].devs[d].allocated) {
-      iorb_seterr(iorb, IOERR_UNIT_ALLOCATED);
-    } else {
+    if (ad_infos[a].ports[p].devs[d].allocated)
+    {
+      iorb_seterr(pIorb, IOERR_UNIT_ALLOCATED);
+    }
+    else
+    {
       ad_infos[a].ports[p].devs[d].allocated = 1;
     }
     break;
 
   case IOCM_DEALLOCATE_UNIT:
     /* deallocate exclusive access to unit */
-    if (!ad_infos[a].ports[p].devs[d].allocated) {
-      iorb_seterr(iorb, IOERR_UNIT_NOT_ALLOCATED);
-    } else {
+    if (!ad_infos[a].ports[p].devs[d].allocated)
+    {
+      iorb_seterr(pIorb, IOERR_UNIT_NOT_ALLOCATED);
+    }
+    else
+    {
       ad_infos[a].ports[p].devs[d].allocated = 0;
     }
     break;
@@ -953,20 +996,21 @@ void iocc_unit_control(IORBH _far *iorb)
      * must store the pointer to the updated UNITNIFO for subsequent
      * IOCC_CONFIGURATION/IOCM_GET_DEVICE_TABLE calls.
      */
-    if (!ad_infos[a].ports[p].devs[d].allocated) {
-      iorb_seterr(iorb, IOERR_UNIT_NOT_ALLOCATED);
+    if (!ad_infos[a].ports[p].devs[d].allocated)
+    {
+      iorb_seterr(pIorb, IOERR_UNIT_NOT_ALLOCATED);
       break;
     }
-    ad_infos[a].ports[p].devs[d].unit_info = iorb_uc->pUnitInfo;
+    ad_infos[a].ports[p].devs[d].unit_info = pIorb_uc->pUnitInfo;
     break;
 
   default:
-    iorb_seterr(iorb, IOERR_CMD_NOT_SUPPORTED);
+    iorb_seterr(pIorb, IOERR_CMD_NOT_SUPPORTED);
     break;
   }
 
   spin_unlock(drv_lock);
-  iorb_done(iorb);
+  iorb_done(vIorb, pIorb);
 }
 
 /******************************************************************************
@@ -992,11 +1036,12 @@ void iocc_unit_control(IORBH _far *iorb)
  *         0     the virtual adapter
  *         1..n  emulated devices; SCSI target ID increments sequentially
  */
-void iocm_device_table(IORBH _far *iorb)
+void iocm_device_table(IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
-  IORB_CONFIGURATION _far *iorb_conf;
-  DEVICETABLE _far *dt;
-  char _far *pos;
+  IORB_CONFIGURATION *pIorb_conf;
+  DEVICETABLE FAR16DATA *vDt;
+  DEVICETABLE *pDt;
+  char *pPos;
   int scsi_units = 0;
   int scsi_id = 1;
   int rc;
@@ -1005,51 +1050,60 @@ void iocm_device_table(IORBH _far *iorb)
   int p;
   int d;
 
-  iorb_conf = (IORB_CONFIGURATION _far *) iorb;
-  dt = iorb_conf->pDeviceTable;
+  pIorb_conf = (IORB_CONFIGURATION *)pIorb;
+  vDt = pIorb_conf->pDeviceTable;
+  pDt = Far16ToFlat(vDt);
 
   spin_lock(drv_lock);
 
   /* initialize device table header */
-  dt->ADDLevelMajor = ADD_LEVEL_MAJOR;
-  dt->ADDLevelMinor = ADD_LEVEL_MINOR;
-  dt->ADDHandle     = add_handle;
-  dt->TotalAdapters = ad_info_cnt + 1;
+  pDt->ADDLevelMajor = ADD_LEVEL_MAJOR;
+  pDt->ADDLevelMinor = ADD_LEVEL_MINOR;
+  pDt->ADDHandle     = add_handle;
+  pDt->TotalAdapters = ad_info_cnt + 1;
 
   /* set start of adapter and device information tables */
-  pos = (char _far *) (dt->pAdapter + dt->TotalAdapters);
+  pPos = (char*)&pDt->pAdapter[pDt->TotalAdapters];
 
   /* go through all adapters, including the virtual SCSI adapter */
-  for (dta = 0; dta < dt->TotalAdapters; dta++) {
-    ADAPTERINFO _far *ptr = (ADAPTERINFO _far *) pos;
+  for (dta = 0; dta < pDt->TotalAdapters; dta++)
+  {
+    ADAPTERINFO *pPtr = (ADAPTERINFO *)pPos;
 
     /* sanity check for sufficient space in device table */
-    if ((u32) (ptr + 1) - (u32) dt > iorb_conf->DeviceTableLen) {
-      dprintf("error: device table provided by DASD too small\n");
-      iorb_seterr(iorb, IOERR_CMD_SW_RESOURCE);
+    if ((u32)(pPtr + 1) - (u32)pDt > pIorb_conf->DeviceTableLen)
+    {
+      dprintf(0,"error: device table provided by DASD too small\n");
+      iorb_seterr(pIorb, IOERR_CMD_SW_RESOURCE);
       goto iocm_device_table_done;
     }
 
-    dt->pAdapter[dta] = (ADAPTERINFO _near *) ((u32) ptr & 0xffff);
-    memset(ptr, 0x00, sizeof(*ptr));
+    pDt->pAdapter[dta] = MakeNear16PtrFromDiff(pIorb_conf->pDeviceTable, pDt, pPtr);
 
-    ptr->AdapterIOAccess = AI_IOACCESS_BUS_MASTER;
-    ptr->AdapterHostBus  = AI_HOSTBUS_OTHER | AI_BUSWIDTH_32BIT;
-    ptr->AdapterFlags    = AF_16M | AF_HW_SCATGAT;
-    ptr->MaxHWSGList     = AHCI_MAX_SG / 2;   /* AHCI S/G elements are 22 bits */
+    //DPRINTF(2,"iocm_device_table: ptr=%x dta=%x pAdapter[dta]=%x pDeviceTable=%x\n",
+    //  ptr, dta, dt->pAdapter[dta], iorb_conf->pDeviceTable);
+    memset(pPtr, 0x00, sizeof(*pPtr));
 
-    if (dta < ad_info_cnt) {
+    pPtr->AdapterIOAccess = AI_IOACCESS_BUS_MASTER;
+    pPtr->AdapterHostBus  = AI_HOSTBUS_OTHER | AI_BUSWIDTH_32BIT;
+    pPtr->AdapterFlags    = AF_16M | AF_HW_SCATGAT;
+    pPtr->MaxHWSGList     = AHCI_MAX_SG / 2;   /* AHCI S/G elements are 22 bits */
+
+    if (dta < ad_info_cnt)
+    {
       /* this is a physical AHCI adapter */
       AD_INFO *ad_info = ad_infos + dta;
 
-      ptr->AdapterDevBus = AI_DEVBUS_ST506 | AI_DEVBUS_32BIT;
-      sprintf(ptr->AdapterName, "AHCI_%d", dta);
+      pPtr->AdapterDevBus = AI_DEVBUS_ST506 | AI_DEVBUS_32BIT;
+      snprintf(pPtr->AdapterName, sizeof(pPtr->AdapterName), "AHCI_%d", dta);
 
-      if (!ad_info->port_scan_done) {
+      if (!ad_info->port_scan_done)
+      {
         /* first call; need to scan AHCI hardware for devices */
-        if (ad_info->busy) {
-          dprintf("error: port scan requested while adapter was busy\n");
-          iorb_seterr(iorb, IOERR_CMD_SW_RESOURCE);
+        if (ad_info->busy)
+        {
+          dprintf(0,"error: port scan requested while adapter was busy\n");
+          iorb_seterr(pIorb, IOERR_CMD_SW_RESOURCE);
           goto iocm_device_table_done;
         }
         ad_info->busy = 1;
@@ -1058,50 +1112,64 @@ void iocm_device_table(IORBH _far *iorb)
         spin_lock(drv_lock);
         ad_info->busy = 0;
 
-        if (rc != 0) {
-          dprintf("error: port scan failed on adapter #%d\n", dta);
-          iorb_seterr(iorb, IOERR_CMD_SW_RESOURCE);
+        if (rc != 0)
+        {
+          dprintf(0,"error: port scan failed on adapter #%d\n", dta);
+          iorb_seterr(pIorb, IOERR_CMD_SW_RESOURCE);
           goto iocm_device_table_done;
         }
         ad_info->port_scan_done = 1;
       }
 
       /* insert physical (i.e. AHCI) devices into the device table */
-      for (p = 0; p <= ad_info->port_max; p++) {
-        for (d = 0; d <= ad_info->ports[p].dev_max; d++) {
-          if (ad_info->ports[p].devs[d].present) {
-            if (ad_info->ports[p].devs[d].atapi && emulate_scsi[dta][p]) {
+      for (p = 0; p <= ad_info->port_max; p++)
+      {
+        for (d = 0; d <= ad_info->ports[p].dev_max; d++)
+        {
+          if (ad_info->ports[p].devs[d].present && !ad_info->ports[p].devs[d].ignored)
+          {
+            if (ad_info->ports[p].devs[d].atapi && emulate_scsi[dta][p])
+            {
               /* report this unit as SCSI unit */
               scsi_units++;
               //continue;
             }
-            if (add_unit_info(iorb_conf, dta, dta, p, d, 0)) {
+            if (add_unit_info(pIorb_conf, dta, dta, p, d, 0))
+            {
               goto iocm_device_table_done;
             }
           }
         }
       }
-
-    } else {
+    }
+    else
+    {
       /* this is the virtual SCSI adapter */
-      if (scsi_units == 0) {
+      if (scsi_units == 0)
+      {
         /* not a single unit to be emulated via SCSI */
-        dt->TotalAdapters--;
+        pDt->TotalAdapters--;
         break;
       }
 
       /* set adapter name and bus type to mimic a SCSI controller */
-      ptr->AdapterDevBus = AI_DEVBUS_SCSI_2 | AI_DEVBUS_16BIT;
-      sprintf(ptr->AdapterName, "AHCI_SCSI_0");
+      pPtr->AdapterDevBus = AI_DEVBUS_SCSI_2 | AI_DEVBUS_16BIT;
+      snprintf(pPtr->AdapterName, sizeof(pPtr->AdapterName), "AHCI_SCSI_0");
 
       /* add all ATAPI units to be emulated by this virtual adaper */
-      for (a = 0; a < ad_info_cnt; a++) {
+      for (a = 0; a < ad_info_cnt; a++)
+      {
         AD_INFO *ad_info = ad_infos + a;
 
-        for (p = 0; p <= ad_info->port_max; p++) {
-          for (d = 0; d <= ad_info->ports[p].dev_max; d++) {
-            if (ad_info->ports[p].devs[d].present && ad_info->ports[p].devs[d].atapi && emulate_scsi[a][p]) {
-              if (add_unit_info(iorb_conf, dta, a, p, d, scsi_id++)) {
+        for (p = 0; p <= ad_info->port_max; p++)
+        {
+          for (d = 0; d <= ad_info->ports[p].dev_max; d++)
+          {
+            if (ad_info->ports[p].devs[d].present && !ad_info->ports[p].devs[d].ignored
+                && ad_info->ports[p].devs[d].atapi && emulate_scsi[a][p])
+            {
+              if (add_unit_info(pIorb_conf, dta, a, p, d, scsi_id++))
+              {
                 goto iocm_device_table_done;
               }
             }
@@ -1111,104 +1179,104 @@ void iocm_device_table(IORBH _far *iorb)
     }
 
     /* calculate offset for next adapter */
-    pos = (char _far *) (ptr->UnitInfo + ptr->AdapterUnits);
+    pPos = (char *)(pPtr->UnitInfo + pPtr->AdapterUnits);
   }
 
 iocm_device_table_done:
   spin_unlock(drv_lock);
-  iorb_done(iorb);
+  iorb_done(vIorb, pIorb);
 }
 
 /******************************************************************************
  * Handle IOCC_GEOMETRY requests.
  */
-void iocc_geometry(IORBH _far *iorb)
+void iocc_geometry(IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
-  switch (iorb->CommandModifier) {
-
+  switch (pIorb->CommandModifier)
+  {
   case IOCM_GET_MEDIA_GEOMETRY:
   case IOCM_GET_DEVICE_GEOMETRY:
-    add_workspace(iorb)->idempotent = 1;
-    ahci_get_geometry(iorb);
+    add_workspace(pIorb)->idempotent = 1;
+    ahci_get_geometry(vIorb, pIorb);
     break;
 
   default:
-    iorb_seterr(iorb, IOERR_CMD_NOT_SUPPORTED);
-    iorb_done(iorb);
+    iorb_seterr(pIorb, IOERR_CMD_NOT_SUPPORTED);
+    iorb_done(vIorb, pIorb);
   }
 }
 
 /******************************************************************************
  * Handle IOCC_EXECUTE_IO requests.
  */
-void iocc_execute_io(IORBH _far *iorb)
+void iocc_execute_io(IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
-  switch (iorb->CommandModifier) {
-
+  switch (pIorb->CommandModifier)
+  {
   case IOCM_READ:
-    add_workspace(iorb)->idempotent = 1;
-    ahci_read(iorb);
+    add_workspace(pIorb)->idempotent = 1;
+    ahci_read(vIorb, pIorb);
     break;
 
   case IOCM_READ_VERIFY:
-    add_workspace(iorb)->idempotent = 1;
-    ahci_verify(iorb);
+    add_workspace(pIorb)->idempotent = 1;
+    ahci_verify(vIorb, pIorb);
     break;
 
   case IOCM_WRITE:
-    add_workspace(iorb)->idempotent = 1;
-    ahci_write(iorb);
+    add_workspace(pIorb)->idempotent = 1;
+    ahci_write(vIorb, pIorb);
     break;
 
   case IOCM_WRITE_VERIFY:
-    add_workspace(iorb)->idempotent = 1;
-    ahci_write(iorb);
+    add_workspace(pIorb)->idempotent = 1;
+    ahci_write(vIorb, pIorb);
     break;
 
   default:
-    iorb_seterr(iorb, IOERR_CMD_NOT_SUPPORTED);
-    iorb_done(iorb);
+    iorb_seterr(pIorb, IOERR_CMD_NOT_SUPPORTED);
+    iorb_done(vIorb, pIorb);
   }
 }
 
 /******************************************************************************
  * Handle IOCC_UNIT_STATUS requests.
  */
-void iocc_unit_status(IORBH _far *iorb)
+void iocc_unit_status(IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
-  switch (iorb->CommandModifier) {
-
+  switch (pIorb->CommandModifier)
+  {
   case IOCM_GET_UNIT_STATUS:
-    add_workspace(iorb)->idempotent = 1;
-    ahci_unit_ready(iorb);
+    add_workspace(pIorb)->idempotent = 1;
+    ahci_unit_ready(vIorb, pIorb);
     break;
 
   default:
-    iorb_seterr(iorb, IOERR_CMD_NOT_SUPPORTED);
-    iorb_done(iorb);
+    iorb_seterr(pIorb, IOERR_CMD_NOT_SUPPORTED);
+    iorb_done(vIorb, pIorb);
   }
 }
 
 /******************************************************************************
  * Handle IOCC_ADAPTER_PASSTHROUGH requests.
  */
-void iocc_adapter_passthru(IORBH _far *iorb)
+void iocc_adapter_passthru(IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
-  switch (iorb->CommandModifier) {
-
+  switch (pIorb->CommandModifier)
+  {
   case IOCM_EXECUTE_CDB:
-    add_workspace(iorb)->idempotent = 0;
-    ahci_execute_cdb(iorb);
+    add_workspace(pIorb)->idempotent = 0;
+    ahci_execute_cdb(vIorb, pIorb);
     break;
 
   case IOCM_EXECUTE_ATA:
-    add_workspace(iorb)->idempotent = 0;
-    ahci_execute_ata(iorb);
+    add_workspace(pIorb)->idempotent = 0;
+    ahci_execute_ata(vIorb, pIorb);
     break;
 
   default:
-    iorb_seterr(iorb, IOERR_CMD_NOT_SUPPORTED);
-    iorb_done(iorb);
+    iorb_seterr(pIorb, IOERR_CMD_NOT_SUPPORTED);
+    iorb_done(vIorb, pIorb);
   }
 }
 
@@ -1216,88 +1284,111 @@ void iocc_adapter_passthru(IORBH _far *iorb)
  * Add an IORB to the specified queue. This function must be called with the
  * adapter-level spinlock aquired.
  */
-void iorb_queue_add(IORB_QUEUE _far *queue, IORBH _far *iorb)
+void iorb_queue_add(IORB_QUEUE *queue, IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
-  if (iorb_priority(iorb) {
+  if (iorb_priority(pIorb)
+  {
     /* priority IORB; insert at first position */
-    iorb->pNxtIORB = queue->root;
-    queue->root = iorb;
-
-  } else {
+    pIorb->pNxtIORB = queue->vRoot;
+    queue->vRoot = vIorb;
+  }
+  else
+  {
     /* append IORB to end of queue */
-    iorb->pNxtIORB = NULL;
+    pIorb->pNxtIORB = FAR16NULL;
 
-    if (queue->root == NULL) {
-      queue->root = iorb;
-    } else {
-      queue->tail->pNxtIORB = iorb;
+    if (queue->vRoot == FAR16NULL)
+    {
+      queue->vRoot = vIorb;
     }
-    queue->tail = iorb;
+    else
+    {
+      ((IORBH *)Far16ToFlat(queue->vTail))->pNxtIORB = vIorb;
+    }
+    queue->vTail = vIorb;
   }
 
-  if (debug) {
+  #ifdef DEBUG
+  if (D32g_DbgLevel)
+  {
     /* determine queue type (local, driver, abort or port) and minimum debug
      * level; otherwise, queue debug prints can become really confusing.
      */
     char *queue_type;
-    int min_debug = 1;
+    int min_debug = 7;
 
-    if ((u32) queue >> 16 == (u32) (void _far *) &queue >> 16) {
+    if ((u32)queue >> 16 == (u32)&queue >> 16) /* DAZ this is bogus */
+    {
       /* this queue is on the stack */
       queue_type = "local";
-      min_debug = 2;
-
-    } else if (queue == &driver_queue) {
+      min_debug = 8;
+    }
+    else if (queue == &driver_queue)
+    {
       queue_type = "driver";
-
-    } else if (queue == &abort_queue) {
+    }
+    else if (queue == &abort_queue)
+    {
       queue_type = "abort";
-      min_debug = 2;
-
-    } else {
+      min_debug = 8;
+    }
+    else
+    {
       queue_type = "port";
     }
 
-    if (debug > min_debug) {
-      aprintf("IORB %Fp queued (cmd = %d/%d, queue = %Fp [%s], timeout = %ld)\n",
-             iorb, iorb->CommandCode, iorb->CommandModifier, queue, queue_type,
-             iorb->Timeout);
-    }
+    DPRINTF(min_debug,"IORB %x queued (cmd=%d/%d queue=%x [%s], timeout=%d)\n",
+           vIorb, pIorb->CommandCode, pIorb->CommandModifier, queue, queue_type,
+           pIorb->Timeout);
   }
+  #endif
 }
 
 /******************************************************************************
  * Remove an IORB from the specified queue. This function must be called with
  * the adapter-level spinlock aquired.
  */
-int iorb_queue_del(IORB_QUEUE _far *queue, IORBH _far *iorb)
+int iorb_queue_del(IORB_QUEUE *queue, IORBH FAR16DATA *vIorb)
 {
-  IORBH _far *_iorb;
-  IORBH _far *_prev = NULL;
+  IORBH FAR16DATA *_vIorb;
+  IORBH FAR16DATA *_vPrev = FAR16NULL;
   int found = 0;
 
-  for (_iorb = queue->root; _iorb != NULL; _iorb = _iorb->pNxtIORB) {
-    if (_iorb == iorb) {
+  for (_vIorb = queue->vRoot; _vIorb != FAR16NULL; )
+  {
+    IORBH *_pIorb = Far16ToFlat(_vIorb);
+    if (_vIorb == vIorb)
+    {
       /* found the IORB to be removed */
-      if (_prev != NULL) {
-        _prev->pNxtIORB = _iorb->pNxtIORB;
-      } else {
-        queue->root = _iorb->pNxtIORB;
+      if (_vPrev != FAR16NULL)
+      {
+        ((IORBH*)Far16ToFlat(_vPrev))->pNxtIORB = _pIorb->pNxtIORB;
       }
-      if (_iorb == queue->tail) {
-        queue->tail = _prev;
+      else
+      {
+        queue->vRoot = _pIorb->pNxtIORB;
+      }
+      if (_vIorb == queue->vTail)
+      {
+        queue->vTail = _vPrev;
       }
       found = 1;
       break;
     }
-    _prev = _iorb;
+    _vPrev = _vIorb;
+    _vIorb = _pIorb->pNxtIORB;
   }
 
-  if (found) {
-    ddprintf("IORB %Fp removed (queue = %Fp)\n", iorb, queue);
-  } else {
-    dprintf("IORB %Fp not found in queue %Fp\n", iorb, queue);
+  #ifdef DEBUG
+  if (found)
+  {
+    DPRINTF(8,"IORB %x removed (queue = %x)\n", vIorb, queue);
   }
+  else
+  {
+    DPRINTF(2,"IORB %x not found in queue %x\n", vIorb, queue);
+  }
+  #endif
 
   return(!found);
 }
@@ -1308,10 +1399,10 @@ int iorb_queue_del(IORB_QUEUE _far *queue, IORBH _far *iorb)
  * NOTE: This function does *not* call iorb_done(). It merely sets the IORB
  *       status to the specified error code.
  */
-void iorb_seterr(IORBH _far *iorb, USHORT error_code)
+void iorb_seterr(IORBH *pIorb, USHORT error_code)
 {
-  iorb->ErrorCode = error_code;
-  iorb->Status |= IORB_ERROR;
+  pIorb->ErrorCode = error_code;
+  pIorb->Status |= IORB_ERROR;
 }
 
 /******************************************************************************
@@ -1332,22 +1423,25 @@ void iorb_seterr(IORBH _far *iorb, USHORT error_code)
  *        implement their own logic for removing the IORB from the port queue.
  *        See abort_ctxhook() for an example.
  */
-void iorb_done(IORBH _far *iorb)
+void iorb_done(IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
-  int a = iorb_unit_adapter(iorb);
-  int p = iorb_unit_port(iorb);
+  int a = iorb_unit_adapter(pIorb);
+  int p = iorb_unit_port(pIorb);
 
   /* remove IORB from corresponding queue */
   spin_lock(drv_lock);
-  if (iorb_driver_level(iorb)) {
-    iorb_queue_del(&driver_queue, iorb);
-  } else {
-    iorb_queue_del(&ad_infos[a].ports[p].iorb_queue, iorb);
+  if (iorb_driver_level(pIorb))
+  {
+    iorb_queue_del(&driver_queue, vIorb);
   }
-  aws_free(add_workspace(iorb));
+  else
+  {
+    iorb_queue_del(&ad_infos[a].ports[p].iorb_queue, vIorb);
+  }
+  aws_free(add_workspace(pIorb));
   spin_unlock(drv_lock);
 
-  iorb_complete(iorb);
+  iorb_complete(vIorb, pIorb);
 }
 
 /******************************************************************************
@@ -1357,15 +1451,16 @@ void iorb_done(IORBH _far *iorb)
  * queue because the IORB completion routine may well reuse the IORB and send
  * the next request to us before even returning from this function.
  */
-void iorb_complete(IORBH _far *iorb)
+void iorb_complete(IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
-  iorb->Status |= IORB_DONE;
+  pIorb->Status |= IORB_DONE;
 
-  ddprintf("IORB %Fp complete (status = 0x%04x, error = 0x%04x)\n",
-          iorb, iorb->Status, iorb->ErrorCode);
+  DPRINTF(7,"IORB %x complete status=0x%04x error=0x%04x\n",
+          vIorb, pIorb->Status, pIorb->ErrorCode);
 
-  if (iorb->RequestControl & IORB_ASYNC_POST) {
-    iorb->NotifyAddress(iorb);
+  if (pIorb->RequestControl & IORB_ASYNC_POST)
+  {
+    Dev32Help_CallFar16((PFNFAR16)pIorb->NotifyAddress, vIorb);
   }
 }
 
@@ -1378,9 +1473,9 @@ void iorb_complete(IORBH _far *iorb)
  * The following flags are preserved:
  *  - no_ncq
  */
-void iorb_requeue(IORBH _far *iorb)
+void iorb_requeue(IORBH *pIorb)
 {
-  ADD_WORKSPACE _far *aws = add_workspace(iorb);
+  ADD_WORKSPACE *aws = add_workspace(pIorb);
   u16 no_ncq = aws->no_ncq;
   u16 unaligned = aws->unaligned;
   u16 retries = aws->retries;
@@ -1397,15 +1492,17 @@ void iorb_requeue(IORBH _far *iorb)
  * Free resources in ADD workspace (timer, buffer, ...). This function should
  * be called with the spinlock held to prevent race conditions.
  */
-void aws_free(ADD_WORKSPACE _far *aws)
+void aws_free(ADD_WORKSPACE *aws)
 {
-  if (aws->timer != 0) {
-    ADD_CancelTimer(aws->timer);
+  if (aws->timer != 0)
+  {
+    Timer_CancelTimer(aws->timer);
     aws->timer = 0;
   }
 
-  if (aws->buf != NULL) {
-    free(aws->buf);
+  if (aws->buf != NULL)
+  {
+    MemFree(aws->buf);
     aws->buf = NULL;
   }
 }
@@ -1420,10 +1517,11 @@ void lock_adapter(AD_INFO *ai)
   TIMER Timer;
 
   spin_lock(drv_lock);
-  while (ai->busy) {
+  while (ai->busy)
+  {
     spin_unlock(drv_lock);
-    timer_init(&Timer, 250);
-    while (!timer_check_and_block(&Timer));
+    TimerInit(&Timer, 250);
+    while (!TimerCheckAndBlock(&Timer));
     spin_lock(drv_lock);
   }
   ai->busy = 1;
@@ -1443,14 +1541,15 @@ void unlock_adapter(AD_INFO *ai)
  * lengthy operations like port resets, the main code is located in a
  * separate function which is invoked via a context hook.
  */
-void _cdecl _far timeout_callback(ULONG timer_handle, ULONG p1, ULONG p2)
+void __syscall timeout_callback(ULONG timer_handle, ULONG p1)
 {
-  IORBH _far *iorb = (IORBH _far *) p1;
-  int a = iorb_unit_adapter(iorb);
-  int p = iorb_unit_port(iorb);
+  IORBH FAR16DATA *vIorb = (IORBH FAR16DATA *)CastULONGToFar16(p1);
+  IORBH *pIorb = Far16ToFlat(vIorb);
+  int a = iorb_unit_adapter(pIorb);
+  int p = iorb_unit_port(pIorb);
 
-  ADD_CancelTimer(timer_handle);
-  dprintf("timeout for IORB %Fp\n", iorb);
+  Timer_CancelTimer(timer_handle);
+  dprintf(0,"timeout for IORB %x\n", vIorb);
 
   /* Move the timed-out IORB to the abort queue. Since it's possible that the
    * IORB has completed after the timeout has expired but before we got to
@@ -1459,9 +1558,10 @@ void _cdecl _far timeout_callback(ULONG timer_handle, ULONG p1, ULONG p2)
    * there is no timeout.
    */
   spin_lock(drv_lock);
-  if (iorb_queue_del(&ad_infos[a].ports[p].iorb_queue, iorb) == 0) {
-    iorb_queue_add(&abort_queue, iorb);
-    iorb->ErrorCode = IOERR_ADAPTER_TIMEOUT;
+  if (iorb_queue_del(&ad_infos[a].ports[p].iorb_queue, vIorb) == 0)
+  {
+    iorb_queue_add(&abort_queue, vIorb, pIorb);
+    pIorb->ErrorCode = IOERR_ADAPTER_TIMEOUT;
   }
   spin_unlock(drv_lock);
 
@@ -1476,7 +1576,7 @@ void _cdecl _far timeout_callback(ULONG timer_handle, ULONG p1, ULONG p2)
    *    start executing. In this case, the already scheduled context hook
    *    will process our IORB as well.
    */
-  DevHelp_ArmCtxHook(0, reset_ctxhook_h);
+  KernArmHook(reset_ctxhook_h, 0, 0);
 
   /* Set up a watchdog timer which calls the context hook manually in case
    * some kernel thread is looping around the IORB_COMPLETE status bit
@@ -1484,7 +1584,7 @@ void _cdecl _far timeout_callback(ULONG timer_handle, ULONG p1, ULONG p2)
    * happen per design because kernel threads are supposed to yield but it
    * does in the early boot phase.
    */
-  ADD_StartTimerMS(&th_reset_watchdog, 5000, (PFN) reset_watchdog, 0, 0);
+  Timer_StartTimerMS(&th_reset_watchdog, 5000, reset_watchdog, 0);
 }
 
 /******************************************************************************
@@ -1498,22 +1598,14 @@ void _cdecl _far timeout_callback(ULONG timer_handle, ULONG p1, ULONG p2)
  * watchdog mechanism we run the risk of getting completely stalled by device
  * problems during the early boot phase.
  */
-void _cdecl _far reset_watchdog(ULONG timer_handle, ULONG p1, ULONG p2)
+void __syscall reset_watchdog(ULONG timer_handle, ULONG p1)
 {
   /* reset watchdog timer */
-  ADD_CancelTimer(timer_handle);
-  dprintf("reset watchdog invoked\n");
+  Timer_CancelTimer(timer_handle);
+  dprintf(0,"reset watchdog invoked\n");
 
   /* call context hook manually */
   reset_ctxhook(0);
-}
-
-/******************************************************************************
- * small_code_ - this dummy func resolves the undefined reference linker
- * error that occurrs when linking WATCOM objects with DDK's link.exe
- */
-void _cdecl small_code_(void)
-{
 }
 
 /******************************************************************************
@@ -1527,74 +1619,52 @@ void _cdecl small_code_(void)
  * indexes for those units are, of course, different from the device table
  * index of the virtual SCSI adapter.
  */
-static int add_unit_info(IORB_CONFIGURATION _far *iorb_conf, int dta,
+static int add_unit_info(IORB_CONFIGURATION *pIorb_conf, int dta,
                          int a, int p, int d, int scsi_id)
 {
-  DEVICETABLE _far *dt = iorb_conf->pDeviceTable;
-  ADAPTERINFO _far *ptr = (ADAPTERINFO _far *) (((u32) dt & 0xffff0000U) +
-                                                 (u16) dt->pAdapter[dta]);
-  UNITINFO _far *ui = ptr->UnitInfo + ptr->AdapterUnits;
+  DEVICETABLE *pDt = Far16ToFlat(pIorb_conf->pDeviceTable);
+  ADAPTERINFO *pPtr;
+  UNITINFO *pUi;
   AD_INFO *ai = ad_infos + a;
 
-  if ((u32) (ui + 1) - (u32) dt > iorb_conf->DeviceTableLen) {
-    dprintf("error: device table provided by DASD too small\n");
-    iorb_seterr(&iorb_conf->iorbh, IOERR_CMD_SW_RESOURCE);
+  pPtr = (ADAPTERINFO *)MakeFlatFromNear16(pIorb_conf->pDeviceTable, pDt->pAdapter[dta]);
+  //DPRINTF(2,"add_unit_info: ptr=%x dta=%x pAdapter[dta]=%x pDeviceTable=%x\n",
+  //    ptr, dta, dt->pAdapter[dta], iorb_conf->pDeviceTable);
+
+  pUi = &pPtr->UnitInfo[pPtr->AdapterUnits];
+
+  if ((u32)(pUi + 1) - (u32)pDt > pIorb_conf->DeviceTableLen)
+  {
+    dprintf(0,"error: device table provided by DASD too small\n");
+    iorb_seterr(&pIorb_conf->iorbh, IOERR_CMD_SW_RESOURCE);
     return(-1);
   }
 
-  if (ai->ports[p].devs[d].unit_info == NULL) {
+  if (ai->ports[p].devs[d].unit_info == NULL)
+  {
     /* provide original information about this device (unit) */
-    memset(ui, 0x00, sizeof(*ui));
-    ui->AdapterIndex = dta;                 /* device table adapter index */
-    ui->UnitHandle   = iorb_unit(a, p, d);  /* physical adapter index */
-    ui->UnitIndex    = ptr->AdapterUnits;
-    ui->UnitType     = ai->ports[p].devs[d].dev_type;
-    ui->QueuingCount = ai->ports[p].devs[d].ncq_max;;
-    if (ai->ports[p].devs[d].removable) {
-      ui->UnitFlags |= UF_REMOVABLE;
+    memset(pUi, 0x00, sizeof(*pUi));
+    pUi->AdapterIndex = dta;                 /* device table adapter index */
+    pUi->UnitHandle   = iorb_unit(a, p, d);  /* physical adapter index */
+    pUi->UnitIndex    = pPtr->AdapterUnits;
+    pUi->UnitType     = ai->ports[p].devs[d].dev_type;
+    pUi->QueuingCount = ai->ports[p].devs[d].ncq_max;
+    if (ai->ports[p].devs[d].removable)
+    {
+      pUi->UnitFlags |= UF_REMOVABLE;
     }
     if (scsi_id > 0) {
       /* set fake SCSI ID for this unit */
-      ui->UnitSCSITargetID = scsi_id;
+      pUi->UnitSCSITargetID = scsi_id;
     }
-  } else {
+  }
+  else
+  {
     /* copy updated device (unit) information (IOCM_CHANGE_UNITINFO) */
-    memcpy(ui, ai->ports[p].devs[d].unit_info, sizeof(*ui));
+    memcpy(pUi, ai->ports[p].devs[d].unit_info, sizeof(*pUi));
   }
 
-  ptr->AdapterUnits++;
+  pPtr->AdapterUnits++;
   return(0);
-}
-
-/*******************************************************************************
- * Register kernel exit handler for trap dumps. Our exit handler will be called
- * right before the kernel starts a dump; that's where we reset the controller
- * so it supports BIOS int13 I/O calls.
- */
-static void register_krnl_exit(void)
-{
-  _asm {
-    push ds
-    push es
-    push bx
-    push si
-    push di
-
-    mov ax, FLAG_KRNL_EXIT_ADD
-    mov cx, TYPE_KRNL_EXIT_INT13
-    mov bx, SEG asm_krnl_exit
-    mov si, OFFSET asm_krnl_exit
-    mov dl, DevHlp_RegisterKrnlExit
-
-    call dword ptr [Device_Help]
-
-    pop  di
-    pop  si
-    pop  bx
-    pop  es
-    pop  ds
-  }
-
-  dprintf("Registered kernel exit routine for INT13 mode\n");
 }
 

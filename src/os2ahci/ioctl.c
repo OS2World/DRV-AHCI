@@ -3,6 +3,7 @@
  *
  * Copyright (c) 2011 thi.guten Software Development
  * Copyright (c) 2011 Mensys B.V.
+ * Copyright (c) 2013-2018 David Azarewicz
  *
  * Authors: Christian Mueller, Markus Thielen
  *
@@ -29,7 +30,7 @@
 #include "ata.h"
 #include "ioctl.h"
 
-#include <scsi.h>
+#include <Dev32scsi.h>
 
 #pragma pack(1)
 
@@ -53,18 +54,15 @@ typedef struct {
   UCHAR               sense[ATAPI_SENSE_LEN];  /* sense buffer */
   SCATGATENTRY        sg_lst[AHCI_MAX_SG / 2]; /* scatter/gather list */
   ULONG               sg_cnt;                  /* number of S/G elements */
-  UCHAR               lh[16];                  /* lock handle for VMLock() */
+  struct _KernVMLock_t lh;                     /* lock handle for KernVMLock() */
 } IOCTL_CONTEXT;
 
 /* -------------------------- function prototypes -------------------------- */
 
-static USHORT do_smart  (BYTE unit, BYTE sub_func, BYTE cnt, BYTE lba_l,
-                         void _far *buf);
-static int    map_unit  (BYTE unit, USHORT _far *a, USHORT _far *p,
-                         USHORT _far *d);
-static LIN    lin       (void _far *p);
+static USHORT do_smart(BYTE unit, BYTE sub_func, BYTE cnt, BYTE lba_l, void *buf);
+static int map_unit(BYTE unit, USHORT *a, USHORT *p, USHORT *d);
 
-IORBH _far * _far _cdecl ioctl_wakeup(IORBH _far *iorb);
+extern IORBH FAR16DATA * (__far16 *Far16AdrOfIoctlWakeup16)(IORBH FAR16DATA*);
 
 /* ------------------------ global/static variables ------------------------ */
 
@@ -74,45 +72,36 @@ IORBH _far * _far _cdecl ioctl_wakeup(IORBH _far *iorb);
  * Return device list to allow the ring 3 application to figure out which
  * adapter/port/device combinations are available.
  */
-USHORT ioctl_get_devlist(RP_GENIOCTL _far *ioctl)
+USHORT ioctl_get_devlist(REQPACKET *ioctl)
 {
-  OS2AHCI_DEVLIST _far *devlst = (OS2AHCI_DEVLIST _far *) ioctl->DataPacket;
+  OS2AHCI_DEVLIST *devlst = (OS2AHCI_DEVLIST*)Far16ToFlat(ioctl->ioctl.pvData);
   USHORT maxcnt = 0;
   USHORT cnt = 0;
   USHORT a;
   USHORT p;
   USHORT d;
 
-  /* verify addressability of parm buffer (number of devlst elements) */
-  if (DevHelp_VerifyAccess((SEL) ((ULONG) ioctl->ParmPacket >> 16),
-                            sizeof(USHORT),
-                            (USHORT) (ULONG) ioctl->ParmPacket,
-                            VERIFY_READONLY) != 0) {
-    return(STDON | STERR | 0x05);
-  }
-
-  maxcnt = *((USHORT _far *) ioctl->ParmPacket);
-
-  /* verify addressability of return buffer (OS2AHCI_DEVLIST) */
-  if (DevHelp_VerifyAccess((SEL) ((ULONG) devlst >> 16),
-                            offsetof(OS2AHCI_DEVLIST, devs) +
-                              sizeof(devlst->devs) * maxcnt,
-                            (USHORT) (ULONG) devlst,
-                            VERIFY_READWRITE) != 0) {
-    return(STDON | STERR | 0x05);
+  if (KernCopyIn(&maxcnt, ioctl->ioctl.pvParm, sizeof(maxcnt)))
+  {
+    return(RPDONE | RPERR_PARAMETER);
   }
 
   /* fill-in device list */
-  for (a = 0; a < ad_info_cnt; a++) {
+  for (a = 0; a < ad_info_cnt; a++)
+  {
     AD_INFO *ai = ad_infos + a;
 
-    for (p = 0; p <= ai->port_max; p++) {
+    for (p = 0; p <= ai->port_max; p++)
+    {
       P_INFO *pi = ai->ports + p;
 
-      for (d = 0; d <= pi->dev_max; d++) {
-        if (pi->devs[d].present) {
+      for (d = 0; d <= pi->dev_max; d++)
+      {
+        if (pi->devs[d].present && !pi->devs[d].ignored)
+        {
           /* add this device to the device list */
-          if (cnt >= maxcnt) {
+          if (cnt >= maxcnt)
+          {
             /* not enough room in devlst */
             goto ioctl_get_device_done;
           }
@@ -135,40 +124,22 @@ USHORT ioctl_get_devlist(RP_GENIOCTL _far *ioctl)
 
 ioctl_get_device_done:
   devlst->cnt = cnt;
-  return(STDON);
+  return(RPDONE);
 }
 
 /******************************************************************************
  * Adapter passthrough IOCTL. This IOCTL covers both ATA and ATAPI passthrough
  * requests.
  */
-USHORT ioctl_passthrough(RP_GENIOCTL _far *ioctl)
+USHORT ioctl_passthrough(REQPACKET *ioctl)
 {
-  OS2AHCI_PASSTHROUGH _far *req = (OS2AHCI_PASSTHROUGH _far *) ioctl->ParmPacket;
-  char _far *sense_buf = (char _far *) ioctl->DataPacket;
+  OS2AHCI_PASSTHROUGH *req = (OS2AHCI_PASSTHROUGH *)Far16ToFlat(ioctl->ioctl.pvParm);
+  char *sense_buf = (char *)Far16ToFlat(ioctl->ioctl.pvData);
   IOCTL_CONTEXT *ic;
   USHORT ret;
   USHORT a;
   USHORT p;
   USHORT d;
-
-  /* verify addressability of parm buffer (OS2AHCI_PASSTHROUGH) */
-  if (DevHelp_VerifyAccess((SEL) ((ULONG) req >> 16),
-                            sizeof(OS2AHCI_PASSTHROUGH),
-                            (USHORT) (ULONG) req,
-                            VERIFY_READWRITE) != 0) {
-    return(STDON | STERR | 0x05);
-  }
-
-  /* verify addressability of data buffer (sense data) */
-  if (req->sense_len > 0) {
-    if (DevHelp_VerifyAccess((SEL) ((ULONG) sense_buf >> 16),
-                              req->sense_len,
-                              (USHORT) (ULONG) sense_buf,
-                              VERIFY_READWRITE) != 0) {
-      return(STDON | STERR | 0x05);
-    }
-  }
 
   /* Verify basic request parameters such as adapter/port/device, size of
    * DMA buffer (the S/G list can't have more than AHCI_MAX_SG / 2 entries), ...
@@ -176,29 +147,35 @@ USHORT ioctl_passthrough(RP_GENIOCTL _far *ioctl)
   a = req->adapter;
   p = req->port;
   d = req->device;
-  if (a >= ad_info_cnt || p > ad_infos[a].port_max ||
-      d > ad_infos[a].ports[p].dev_max || !ad_infos[a].ports[p].devs[d].present) {
-    return(STDON | STERR | ERROR_I24_BAD_UNIT);
+  if (a >= ad_info_cnt || p > ad_infos[a].port_max
+     || d > ad_infos[a].ports[p].dev_max
+     || !ad_infos[a].ports[p].devs[d].present
+     || ad_infos[a].ports[p].devs[d].ignored)
+  {
+    return(RPDONE | RPERR_UNIT);
   }
   if ((req->buflen + 4095) / 4096 + 1 > AHCI_MAX_SG / 2 ||
-      req->cmdlen < 6 || req->cmdlen > sizeof(req->cmd)) {
-    return(STDON | STERR | ERROR_I24_INVALID_PARAMETER);
+      req->cmdlen < 6 || req->cmdlen > sizeof(req->cmd))
+  {
+    return(RPDONE | RPERR_PARAMETER);
   }
 
   /* allocate IOCTL context data */
-  if ((ic = malloc(sizeof(*ic))) == NULL) {
-    return(STDON | STERR | ERROR_I24_GEN_FAILURE);
+  if ((ic = MemAlloc(sizeof(*ic))) == NULL)
+  {
+    return(RPDONE | RPERR_GENERAL);
   }
   memset(ic, 0x00, sizeof(*ic));
 
   /* lock DMA transfer buffer into memory and construct S/G list */
-  if (req->buflen > 0) {
-    if (DevHelp_VMLock(VMDHL_LONG | !((req->flags & PT_WRITE) ? VMDHL_WRITE : 0),
-                       req->buf, req->buflen, lin(ic->sg_lst), lin(&ic->lh),
-                       &ic->sg_cnt) != 0) {
+  if (req->buflen > 0)
+  {
+    if (KernVMLock(VMDHL_LONG | !((req->flags & PT_WRITE) ? VMDHL_WRITE : 0),
+                       req->buf, req->buflen, &ic->lh, (KernPageList_t*)&ic->sg_lst, &ic->sg_cnt) != 0)
+    {
       /* couldn't lock buffer and/or produce a S/G list */
-      free(ic);
-      return(STDON | STERR | ERROR_I24_INVALID_PARAMETER);
+      MemFree(ic);
+      return(RPDONE | RPERR_PARAMETER);
     }
   }
 
@@ -209,80 +186,84 @@ USHORT ioctl_passthrough(RP_GENIOCTL _far *ioctl)
   ic->iorb.iorbh.CommandModifier  = (req->flags & PT_ATAPI) ? IOCM_EXECUTE_CDB : IOCM_EXECUTE_ATA;
   ic->iorb.iorbh.RequestControl   = IORB_ASYNC_POST;
   ic->iorb.iorbh.Timeout          = req->timeout;
-  ic->iorb.iorbh.NotifyAddress    = ioctl_wakeup;
+  ic->iorb.iorbh.NotifyAddress    = Far16AdrOfIoctlWakeup16;
 
-  ic->iorb.cSGList          = ic->sg_cnt;
-  ic->iorb.pSGList          = ic->sg_lst;
-  ic->iorb.ppSGLIST         = virt_to_phys(ic->sg_lst);
+  ic->iorb.cSGList = ic->sg_cnt;
+  ic->iorb.pSGList = MemFar16Adr(ic->sg_lst);
+  ic->iorb.ppSGLIST = MemPhysAdr(ic->sg_lst);
 
   memcpy(ic->cmd, req->cmd.cdb, sizeof(ic->cmd));
   ic->iorb.ControllerCmdLen = req->cmdlen;
-  ic->iorb.pControllerCmd   = ic->cmd;
+  ic->iorb.pControllerCmd   = MemFar16Adr(ic->cmd);
   ic->iorb.Flags            = (req->flags & PT_WRITE) ? 0 : PT_DIRECTION_IN;
 
-  if (req->sense_len > 0) {
+  if (req->sense_len > 0)
+  {
     /* initialize SCSI status block to allow getting sense data */
-    ic->iorb.iorbh.pStatusBlock     = (BYTE *) &ic->ssb;
+    ic->iorb.iorbh.pStatusBlock     = CastFar16ToULONG(MemFar16Adr(&ic->ssb));
     ic->iorb.iorbh.StatusBlockLen   = sizeof(ic->ssb);
-    ic->ssb.SenseData               = (SCSI_REQSENSE_DATA _far *) ic->sense;
+    ic->ssb.SenseData               = MemFar16Adr(ic->sense);
     ic->ssb.ReqSenseLen             = sizeof(ic->sense);
     ic->iorb.iorbh.RequestControl  |= IORB_REQ_STATUSBLOCK;
   }
 
   /* send IORB on its way */
-  add_entry(&ic->iorb.iorbh);
+  add_entry(MemFar16Adr(&ic->iorb.iorbh));
 
   /* Wait for IORB completion. */
-  spin_lock(drv_lock);
-  while (!(ic->iorb.iorbh.Status & IORB_DONE)) {
-    DevHelp_ProcBlock((ULONG) (void _far *) &ic->iorb.iorbh, 30000, 1);
-  }
-  spin_unlock(drv_lock);
 
-  ret = STDON;
+  //DAZ 20171206 spin_lock(drv_lock);
+  while (!(ic->iorb.iorbh.Status & IORB_DONE))
+  {
+    KernBlock(CastFar16ToULONG(MemFar16Adr(&ic->iorb.iorbh)), 30000, 0, NULL, NULL);
+  }
+  //DAZ 20171206 spin_unlock(drv_lock);
+
+  ret = RPDONE;
 
   /* map IORB error codes to device driver error codes */
-  if (ic->iorb.iorbh.Status & IORB_ERROR) {
-    ret |= STERR;
+  if (ic->iorb.iorbh.Status & IORB_ERROR)
+  {
+    ret |= RPERR;
 
-    switch (ic->iorb.iorbh.ErrorCode) {
-
+    switch (ic->iorb.iorbh.ErrorCode)
+    {
     case IOERR_UNIT_NOT_READY:
-      ret |= ERROR_I24_NOT_READY;
+      ret |= RPERR_NOTREADY;
       break;
 
     case IOERR_MEDIA_CHANGED:
-      ret |= ERROR_I24_DISK_CHANGE;
+      ret |= RPERR_DISK;
       break;
 
     case IOERR_MEDIA:
     case IOERR_MEDIA_NOT_FORMATTED:
-      ret |= ERROR_I24_CRC;
+      ret |= RPERR_CRC;
       break;
 
     case IOERR_CMD_SYNTAX:
     case IOERR_CMD_NOT_SUPPORTED:
-      ret |= ERROR_I24_BAD_COMMAND;
+      ret |= RPERR_BADCOMMAND;
       break;
 
     case IOERR_MEDIA_WRITE_PROTECT:
-      ret |= ERROR_I24_WRITE_PROTECT;
+      ret |= RPERR_PROTECT;
       break;
 
     case IOERR_CMD_ABORTED:
-      ret |= ERROR_I24_CHAR_CALL_INTERRUPTED;
+      ret |= RPERR_INTERRUPTED;
       break;
 
     case IOERR_RBA_ADDRESSING_ERROR:
-      ret |= ERROR_I24_SEEK;
+      ret |= RPERR_SEEK;
       break;
 
     case IOERR_RBA_LIMIT:
-      ret |= ERROR_I24_SECTOR_NOT_FOUND;
+      ret |= RPERR_SECTOR;
       break;
 
     case IOERR_CMD_SGLIST_BAD:
-      ret |= ERROR_I24_INVALID_PARAMETER;
+      ret |= RPERR_PARAMETER;
       break;
 
     case IOERR_DEVICE_NONSPECIFIC:
@@ -291,18 +272,19 @@ USHORT ioctl_passthrough(RP_GENIOCTL _far *ioctl)
     case IOERR_CMD_ADD_SOFTWARE_FAILURE:
     case IOERR_CMD_SW_RESOURCE:
     default:
-      ret |= ERROR_I24_GEN_FAILURE;
+      ret |= RPERR_GENERAL;
       break;
     }
 
     /* copy sense information, if there is any */
     if ((ic->iorb.iorbh.Status & IORB_STATUSBLOCK_AVAIL) &&
-        (ic->ssb.Flags | STATUS_SENSEDATA_VALID)) {
-      memcpy(sense_buf, ic->ssb.SenseData,
-             min(ic->ssb.ReqSenseLen, req->sense_len));
+        (ic->ssb.Flags | STATUS_SENSEDATA_VALID))
+    {
+      memcpy(sense_buf, ic->sense, min(ic->ssb.ReqSenseLen, req->sense_len));
     }
-
-  } else if ((req->flags & PT_ATAPI) == 0) {
+  }
+  else if ((req->flags & PT_ATAPI) == 0)
+  {
     /* Copy ATA cmd back to IOCTL request (ATA commands are effectively
      * registers which are sometimes used to indicate return conditions,
      * e.g. when requesting the smart status)
@@ -310,10 +292,8 @@ USHORT ioctl_passthrough(RP_GENIOCTL _far *ioctl)
     memcpy(&req->cmd.ata, ic->cmd, sizeof(req->cmd.ata));
   }
 
-  free(ic);
-  if (req->buflen > 0) {
-    DevHelp_VMUnLock(lin(ic->lh));
-  }
+  MemFree(ic);
+  if (req->buflen > 0) KernVMUnlock(&ic->lh);
   return(ret);
 }
 
@@ -324,12 +304,12 @@ USHORT ioctl_passthrough(RP_GENIOCTL _far *ioctl)
  * NOTE: Only a subset of the IOCTL calls are implemented in OS2AHCI at this
  *       point, basically those calls required to get HDMON working.
  */
-USHORT ioctl_gen_dsk(RP_GENIOCTL _far *ioctl)
+USHORT ioctl_gen_dsk(REQPACKET *ioctl)
 {
-  DSKSP_CommandParameters _far *cp = (DSKSP_CommandParameters _far *) ioctl->ParmPacket;
-  UnitInformationData _far *ui;
+  DSKSP_CommandParameters *cp = (DSKSP_CommandParameters*)Far16ToFlat(ioctl->ioctl.pvParm);
+  UnitInformationData *ui;
   OS2AHCI_PASSTHROUGH pt;
-  RP_GENIOCTL tmp_ioctl;
+  REQPACKET tmp_ioctl;
   USHORT size = 0;
   USHORT ret;
   USHORT a;
@@ -337,18 +317,11 @@ USHORT ioctl_gen_dsk(RP_GENIOCTL _far *ioctl)
   USHORT d;
   UCHAR unit;
 
-  /* verify addressability of parm buffer (DSKSP_CommandParameters) */
-  if (DevHelp_VerifyAccess((SEL) ((ULONG) cp >> 16),
-                            sizeof(DSKSP_CommandParameters),
-                            (USHORT) (ULONG) cp,
-                            VERIFY_READONLY) != 0) {
-    return(STDON | STERR | 0x05);
-  }
   unit = cp->byPhysicalUnit;
 
   /* verify addressability of data buffer (depends on function code) */
-  switch (ioctl->Function) {
-
+  switch (ioctl->ioctl.bFunction)
+  {
   case DSKSP_GEN_GET_COUNTERS:
     size = sizeof(DeviceCountersData);
     break;
@@ -362,35 +335,28 @@ USHORT ioctl_gen_dsk(RP_GENIOCTL _far *ioctl)
     break;
   }
 
-  if (size > 0) {
-    if (DevHelp_VerifyAccess((SEL) ((ULONG) ioctl->DataPacket >> 16),
-                             size, (USHORT) (ULONG) ioctl->DataPacket,
-                             VERIFY_READWRITE) != 0) {
-      return(STDON | STERR | 0x05);
-    }
-  }
-
-  if (map_unit(unit, &a, &p, &d)) {
-    return(STDON | STERR | ERROR_I24_BAD_UNIT);
+  if (map_unit(unit, &a, &p, &d))
+  {
+    return(RPDONE | RPERR | RPERR_UNIT);
   }
 
   /* execute generic disk request */
-  switch (ioctl->Function) {
-
+  switch (ioctl->ioctl.bFunction)
+  {
   case DSKSP_GEN_GET_COUNTERS:
     /* Not supported, yet; we would need dynamically allocated device
      * structures to cope with the memory requirements of the corresponding
      * statistics buffer. For the time being, we'll return an empty buffer.
      */
-    memset(ioctl->DataPacket, 0x00, sizeof(DeviceCountersData));
-    ret = STDON;
+    memset(Far16ToFlat(ioctl->ioctl.pvData), 0x00, sizeof(DeviceCountersData));
+    ret = RPDONE;
     break;
 
   case DSKSP_GET_UNIT_INFORMATION:
     /* get unit information; things like port addresses won't fit so we don't
      * even bother returning those.
      */
-    ui = (UnitInformationData _far *) ioctl->DataPacket;
+    ui = (UnitInformationData*)Far16ToFlat(ioctl->ioctl.pvData);
     memset(ui, 0x00, sizeof(*ui));
 
     ui->wRevisionNumber = 1;
@@ -401,15 +367,15 @@ USHORT ioctl_gen_dsk(RP_GENIOCTL _far *ioctl)
     ui->wFlags         |= (ad_infos[a].ports[p].devs[d].atapi) ? UIF_ATAPI : 0;
     ui->wFlags         |= UIF_SATA;
 
-    ret = STDON;
+    ret = RPDONE;
     break;
 
   case DSKSP_GET_INQUIRY_DATA:
     /* return ATA ID buffer */
     memset(&tmp_ioctl, 0x00, sizeof(tmp_ioctl));
-    tmp_ioctl.Category   = OS2AHCI_IOCTL_CATEGORY;
-    tmp_ioctl.Function   = OS2AHCI_IOCTL_PASSTHROUGH;
-    tmp_ioctl.ParmPacket = (void _far *) &pt;
+    tmp_ioctl.ioctl.bCategory   = OS2AHCI_IOCTL_CATEGORY;
+    tmp_ioctl.ioctl.bFunction   = OS2AHCI_IOCTL_PASSTHROUGH;
+    tmp_ioctl.ioctl.pvParm = FlatToFar16(&pt);
 
     memset(&pt, 0x00, sizeof(pt));
     pt.adapter          = a;
@@ -419,13 +385,13 @@ USHORT ioctl_gen_dsk(RP_GENIOCTL _far *ioctl)
     pt.cmd.ata.cmd      = (ad_infos[a].ports[p].devs[d].atapi) ?
                            ATA_CMD_ID_ATAPI : ATA_CMD_ID_ATA;
     pt.buflen           = size;
-    pt.buf              = lin(ioctl->DataPacket);
+    pt.buf              = Far16ToFlat(ioctl->ioctl.pvData);
 
     ret = gen_ioctl(&tmp_ioctl);
     break;
 
   default:
-    ret = STDON | STATUS_ERR_UNKCMD;
+    ret = RPDONE | RPERR_BADCOMMAND;
     break;
   }
 
@@ -436,49 +402,25 @@ USHORT ioctl_gen_dsk(RP_GENIOCTL _far *ioctl)
  * SMART IOCTL handler; this IOCTL category has originally been defined in
  * IBM1S506; the code has been more or less copied from DANIS506.
  */
-USHORT ioctl_smart(RP_GENIOCTL _far *ioctl)
+USHORT ioctl_smart(REQPACKET *ioctl)
 {
-  DSKSP_CommandParameters _far *cp = (DSKSP_CommandParameters _far *) ioctl->ParmPacket;
-  USHORT size = 0;
+  DSKSP_CommandParameters *cp = (DSKSP_CommandParameters *)Far16ToFlat(ioctl->ioctl.pvParm);
   USHORT ret;
   UCHAR unit;
-  UCHAR parm;
+  UCHAR parm = 0;
+  void *pData = NULL;
 
-  /* verify addressability of parm buffer (DSKSP_CommandParameters) */
-  if (DevHelp_VerifyAccess((SEL) ((ULONG) cp >> 16),
-                            sizeof(DSKSP_CommandParameters),
-                            (USHORT) (ULONG) cp,
-                            VERIFY_READONLY) != 0) {
-    return(STDON | STERR | 0x05);
-  }
   unit = cp->byPhysicalUnit;
 
-  /* verify addressability of data buffer (depends on SMART function) */
-  switch (ioctl->Function) {
-
-  case DSKSP_SMART_GETSTATUS:
-    size = sizeof(ULONG);
-    break;
-
-  case DSKSP_SMART_GET_ATTRIBUTES:
-  case DSKSP_SMART_GET_THRESHOLDS:
-  case DSKSP_SMART_GET_LOG:
-    size = 512;
-    break;
-  }
-
-  if (size > 0) {
-    if (DevHelp_VerifyAccess((SEL) ((ULONG) ioctl->DataPacket >> 16),
-                             size, (USHORT) (ULONG) ioctl->DataPacket,
-                             VERIFY_READWRITE) != 0) {
-      return(STDON | STERR | 0x05);
-    }
-    parm = ioctl->DataPacket[0];
+  if (ioctl->ioctl.pvData)
+  {
+    pData = (void*)Far16ToFlat(ioctl->ioctl.pvData);
+    parm = *(UCHAR*)pData;
   }
 
   /* execute SMART request */
-  switch (ioctl->Function) {
-
+  switch (ioctl->ioctl.bFunction)
+  {
   case DSKSP_SMART_ONOFF:
     ret = do_smart(unit, (BYTE) ((parm) ? ATA_SMART_ENABLE : ATA_SMART_DISABLE), 0, 0, NULL);
     break;
@@ -500,23 +442,23 @@ USHORT ioctl_smart(RP_GENIOCTL _far *ioctl)
     break;
 
   case DSKSP_SMART_GETSTATUS:
-    ret = do_smart(unit, ATA_SMART_STATUS, 0, 0, ioctl->DataPacket);
+    ret = do_smart(unit, ATA_SMART_STATUS, 0, 0, pData);
     break;
 
   case DSKSP_SMART_GET_ATTRIBUTES:
-    ret = do_smart(unit, ATA_SMART_READ_VALUES, 0, 0, ioctl->DataPacket);
+    ret = do_smart(unit, ATA_SMART_READ_VALUES, 0, 0, pData);
     break;
 
   case DSKSP_SMART_GET_THRESHOLDS:
-    ret = do_smart(unit, ATA_SMART_READ_THRESHOLDS, 0, 0, ioctl->DataPacket);
+    ret = do_smart(unit, ATA_SMART_READ_THRESHOLDS, 0, 0, pData);
     break;
 
   case DSKSP_SMART_GET_LOG:
-    ret = do_smart(unit, ATA_SMART_READ_LOG, 1, parm, ioctl->DataPacket);
+    ret = do_smart(unit, ATA_SMART_READ_LOG, 1, parm, pData);
     break;
 
   default:
-    ret = STDON | STATUS_ERR_UNKCMD;
+    ret = RPDONE | RPERR_BADCOMMAND;
   }
 
   return(ret);
@@ -525,26 +467,27 @@ USHORT ioctl_smart(RP_GENIOCTL _far *ioctl)
 /******************************************************************************
  * Perform SMART request. The code has been more or less copied from DANIS506.
  */
-static USHORT do_smart(BYTE unit, BYTE sub_func, BYTE cnt, BYTE lba_l, void _far *buf)
+static USHORT do_smart(BYTE unit, BYTE sub_func, BYTE cnt, BYTE lba_l, void *buf)
 {
   OS2AHCI_PASSTHROUGH pt;
-  RP_GENIOCTL ioctl;
+  REQPACKET ioctl;
   USHORT ret;
   USHORT a;
   USHORT p;
   USHORT d;
 
-  if (map_unit(unit, &a, &p, &d)) {
-    return(STDON | STERR | ERROR_I24_BAD_UNIT);
+  if (map_unit(unit, &a, &p, &d))
+  {
+    return(RPDONE | RPERR_UNIT);
   }
 
   /* Perform SMART request using the existing OS2AHCI_IOTCL_PASSTHROUGH IOCTL
    * interface which already takes care of allocating an IORB, s/g lists, etc.
    */
   memset(&ioctl, 0x00, sizeof(ioctl));
-  ioctl.Category   = OS2AHCI_IOCTL_CATEGORY;
-  ioctl.Function   = OS2AHCI_IOCTL_PASSTHROUGH;
-  ioctl.ParmPacket = (void _far *) &pt;
+  ioctl.ioctl.bCategory   = OS2AHCI_IOCTL_CATEGORY;
+  ioctl.ioctl.bFunction   = OS2AHCI_IOCTL_PASSTHROUGH;
+  ioctl.ioctl.pvParm = FlatToFar16(&pt);
 
   memset(&pt, 0x00, sizeof(pt));
   pt.adapter          = a;
@@ -556,22 +499,24 @@ static USHORT do_smart(BYTE unit, BYTE sub_func, BYTE cnt, BYTE lba_l, void _far
   pt.cmd.ata.lba_l    = (0xc24fL << 8) | lba_l;
   pt.cmd.ata.cmd      = ATA_CMD_SMART;
 
-  if (buf != NULL && sub_func != ATA_SMART_STATUS) {
+  if (buf != NULL && sub_func != ATA_SMART_STATUS)
+  {
     pt.buflen         = 512;
-    pt.buf            = lin(buf);
+    pt.buf            = buf;
   }
 
-  if (((ret = gen_ioctl(&ioctl)) & STERR) == 0 && sub_func == ATA_SMART_STATUS) {
-
+  if (((ret = gen_ioctl(&ioctl)) & RPERR) == 0 && sub_func == ATA_SMART_STATUS)
+  {
     /* ATA_SMART_STATUS doesn't transfer anything but instead relies on the
      * returned D2H FIS, mapped to the ATA CMD, to have a certain value
      * (0xf42c); the IOCTL result is expected to be returned as a ULONG in
      * the data buffer.
      */
-    if (((pt.cmd.ata.lba_l >> 8) & 0xffff) == 0xf42c) {
-      *((ULONG _far *) buf) = 1;
+    if (((pt.cmd.ata.lba_l >> 8) & 0xffff) == 0xf42c)
+    {
+      *((ULONG *) buf) = 1;
     } else {
-      *((ULONG _far *) buf) = 0;
+      *((ULONG *) buf) = 0;
     }
   }
 
@@ -584,22 +529,27 @@ static USHORT do_smart(BYTE unit, BYTE sub_func, BYTE cnt, BYTE lba_l, void _far
  * selecting between master (0) and slave (1). This number is mapped to our
  * ATA/ATAPI units sequentially.
  */
-static int map_unit(BYTE unit, USHORT _far *a, USHORT _far *p, USHORT _far *d)
+static int map_unit(BYTE unit, USHORT *a, USHORT *p, USHORT *d)
 {
   USHORT _a;
   USHORT _p;
   USHORT _d;
 
   /* map unit to adapter/port/device */
-  for (_a = 0; _a < ad_info_cnt; _a++) {
+  for (_a = 0; _a < ad_info_cnt; _a++)
+  {
     AD_INFO *ai = ad_infos + _a;
 
-    for (_p = 0; _p <= ai->port_max; _p++) {
+    for (_p = 0; _p <= ai->port_max; _p++)
+    {
       P_INFO *pi = ai->ports + _p;
 
-      for (_d = 0; _d <= pi->dev_max; _d++) {
-        if (pi->devs[_d].present) {
-          if (unit-- == 0) {
+      for (_d = 0; _d <= pi->dev_max; _d++)
+      {
+        if (pi->devs[_d].present && !pi->devs[_d].ignored)
+        {
+          if (unit-- == 0)
+          {
             /* found the device */
             *a = _a;
             *p = _p;
@@ -616,29 +566,12 @@ static int map_unit(BYTE unit, USHORT _far *a, USHORT _far *p, USHORT _far *d)
 }
 
 /******************************************************************************
- * Get linear address for specified virtual address.
- */
-static LIN lin(void _far *p)
-{
-  LIN l;
-
-  if (DevHelp_VirtToLin((SEL) ((ULONG) p >> 16), (USHORT) (ULONG) p, &l) != 0) {
-    return(0);
-  }
-
-  return(l);
-}
-
-/******************************************************************************
  * IORB notification routine; used to wake up the sleeping application thread
  * when the IOCTL IORB is complete.
  */
-IORBH _far * _far _cdecl ioctl_wakeup(IORBH _far *iorb)
+IORBH *IoctlWakeup(ULONG ulArg)
 {
-  USHORT awake_count;
-
-  DevHelp_ProcRun((ULONG) iorb, &awake_count);
-
+  KernWakeup(ulArg, 0, NULL, 0);
   return(NULL);
 }
 

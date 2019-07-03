@@ -3,35 +3,21 @@
 # This is an Open Watcom makefile
 #
 # Copyright (c) 2010 Christian Mueller, Markus Thielen.
-# Copyright (c) 2013 David Azarewicz
-# Parts copied from/inspired by the Linux AHCI driver;
-# those parts are (c) Linux AHCI/ATA maintainers
+# Copyright (c) 2013-2016 David Azarewicz
 #
-#  This program is free software; you can redistribute it and/or modify
-#  it under the terms of the GNU General Public License as published by
-#  the Free Software Foundation; either version 2 of the License, or
-#  (at your option) any later version.
-#
-#  This program is distributed in the hope that it will be useful,
-#  but WITHOUT ANY WARRANTY; without even the implied warranty of
-#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#  GNU General Public License for more details.
-#
-#  You should have received a copy of the GNU General Public License
-#  along with this program; if not, write to the Free Software
-#  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
-###############################################################################
-# Environment
-
 .ERASE
 .SUFFIXES
 .SUFFIXES: .lst .obj .c .asm .lib .def
 
 # Define default build version if not specified in environment
-BLD_MAJOR=1
-BLD_MINOR=32 # must be 2 digits
+BLD_MAJOR=2
+BLD_MINOR=07 # must be 2 digits
 BLD_REV=0 # not used at this time
-FIXPACK=
+
+!ifndef %ROOT
+!error ROOT must be set in the environment.
+!endif
+ROOT=$(%ROOT)
 
 !ifndef %WATCOM # if not defined in the environment
 !error WATCOM must be set in the environment.
@@ -42,6 +28,11 @@ WATCOM=$(%WATCOM)
 !error DDK must be set in the environment.
 !endif
 DDK=$(%DDK)
+
+!ifndef %DRV32KIT
+!error DRV32KIT must be defined in environment
+!endif
+DRV32KIT=$(%DRV32KIT)
 
 !ifdef %VENDOR
 VENDOR=$(%VENDOR)
@@ -57,132 +48,140 @@ BLD_MAJOR=$(%BLD_MAJOR)
 BLD_MINOR=$(%BLD_MINOR)
 !endif
 
+!ifdef %FIXPACK
+FIXPACK=$(%FIXPACK)
+!endif
+
+VERSION=$(BLD_MAJOR).$(BLD_MINOR)
+ZIPDIR=$(ROOT)\tmp
+
+!if "$(FIXPACK)"!=""
+!ifndef %BLD_DATE
+!error BLD_DATE must be defined for test versions
+!endif
+WPIFILE=$(ROOT)\AHCI-$(VERSION)-$(%BLD_DATE)-WPI.zip
+!else
+WPIFILE=$(ROOT)\AHCI-$(VERSION)-WPI.zip
+!endif
+
 AS_INCLUDE = -I=$(DDK)\base\inc
-LIB_DIRS = $(DDK)\base\lib\
 
-###############################################################################
-# Tool Chain
-#
-# This makefile uses the Watcom 16-bit compiler, Watcom Assembler and Linker.
-# The updated DDK devhelp.h is required and a copy is in the include directory
-# of this project.
-#
+%INCLUDE=.;$(ROOT)\src\include;$(DRV32KIT);$(WATCOM)\H;$(DDK)\base\h;$(DDK)\base32\h;
+%PATH=$(ROOT)\Tools;$(TOOLKIT)\bin;$(DDK)\base\tools;$(WATCOM)\BINP;$(WATCOM)\BINW;$(%PATH)
 
-%INCLUDE=..\include;$(DDK)\base\h;
-%PATH=..\..\tools;$(WATCOM)\BINP;$(WATCOM)\BINW;$(DDK)\base\tools;
 AS=wasm
-CC=wcc
+CC=wcc386
 MAPSYM=mapsym.exe
 
 !ifdef __LOADDLL__
-!loaddll wcc   $(WATCOM)\BINP\DLL\wccd.dll
+!loaddll wcc386   $(WATCOM)\BINP\DLL\wccd386.dll
 !loaddll wlink $(WATCOM)\BINP\DLL\wlinkd.dll
 !endif
 
-AFLAGS = -q
-CFLAGS= -ei -6 -d0 -bt=os2 -ms -zu -wx -ecc -zp1 -q -s -zgp -zfp -oi
-CFLAGS_DEBUG = -ei -6 -d3 -hc -bt=os2 -ms -zu -ecc -zp1 -q -s -zgp -zfp -od
-!ifneq FIXPACK
-CFLAGS+= -DTESTVER
+#DAZ need to find which structures need pack(1) so we can reset this back to -zp4
+AFLAGS=-q -6p -bt=os2 -wx -d1
+CFLAGS =-q -bt=os2 -6s -olinar -s -ze -zl -zq -zfp -zgp -ms -wx -zp1 -ecs -ei -za99
+
+!ifdef DEBUG
+CDEFS=-DDEBUG
+O=Debug
+!else
+CDEFS=
+O=Retail
 !endif
 
-###############################################################################
-# Main dependencies
+!ifdef FIXPACK
+CDEFS+= -DTESTVER
+!endif
 
-LIBS = addcalls doscalls rmcalls apmcalls os2286p.lib
+LIBS = $(DRV32KIT)\Drv32.lib $(DDK)\base32\lib\kee.lib
 
-SRCS = init.asm math.asm libc.c os2ahci.c pci.c ahci.c ata.c atapi.c &
-       ctxhook.c trace.c ioctl.c apm.c
-
-OBJS = init.obj libc.obj os2ahci.obj pci.obj ahci.obj ata.obj atapi.obj &
-       ctxhook.obj trace.obj ioctl.obj apm.obj
-
-INCS = os2ahci.h ahci.h
-
-all: os2ahci.add os2ahci.sym
-
-clean: .symbolic
-    rm -f $(OBJS) os2ahci.add *.cod *.lst *.def *.map *.sym *.err *.lnk version.h
-
-###############################################################################
-# Object/source dependencies
-
-libc.obj: libc.c Makefile $(INCS)
-
-os2ahci.obj: os2ahci.c Makefile $(INCS) version.h ioctl.h
-
-pci.obj: pci.c Makefile $(INCS)
-
-ahci.obj: ahci.c Makefile $(INCS) ata.h atapi.h
-
-ata.obj: ata.c Makefile $(INCS) ata.h
-
-atapi.obj: atapi.c Makefile $(INCS) atapi.h ata.h
-
-ctxhook.obj: ctxhook.c Makefile $(INCS) ata.h atapi.h
-
-apm.obj: apm.c Makefile $(INCS)
-
-ioctl.obj: ioctl.c Makefile $(INCS) ioctl.h atapi.h
-
-trace.obj: trace.c Makefile $(INCS)
-
-###############################################################################
-# Action definitions (compile/link commands)
-
-# emacs TAGS file creation
-# NOTE: OS/2 emacs etags.exe expects an empty file named c:\dev\null...
-tags:   $(SRCS) $(INCS)
-    etags.exe $(SRCS) $(INCS)
-
-version.h: Makefile .always
-    @%create $^@
-    @%append $^@ /* Autogenerated by Makefile */
-    @%append $^@ $#define VERSION $(BLD_MAJOR)$(BLD_MINOR) /* driver version (2 implied decimals) */
-    @%append $^@ $#define DVENDOR "$(VENDOR)"
-    @AddToFile $^@,$#define BLD_YEAR,DATEYEAR
-    @AddToFile $^@,$#define BLD_MONTH,DATEMONTH
-    @AddToFile $^@,$#define BLD_DAY,DATEDAY
-    @AddToFile $^@,$#define BLDLEVEL,BLDLEVEL2,$(VENDOR),$(BLD_MAJOR).$(BLD_MINOR),AHCI Driver (c) 2013 $(VENDOR),$(FIXPACK)
+OBJS = $(O)\os2ahci.obj $(O)\pci.obj $(O)\ahci.obj $(O)\ata.obj $(O)\atapi.obj &
+       $(O)\ctxhook.obj $(O)\trace.obj $(O)\ioctl.obj $(O)\apm.obj $(O)\thunk.obj
 
 .asm.obj: .autodepend
-    $(AS) $(AFLAGS) $(AS_INCLUDE) $[@
-    #wdis -l $^@
+  $(AS) $(AFLAGS) -fo=$^@ $[@
+  #wdis -l $^@
 
 .c.obj: .autodepend
-    $(CC) $(CFLAGS) $[@
-    #wdis -l $^@
+  $(CC) $(CFLAGS) $(CDEFS) -fo=$^@ $[@
+  wdis -l $^@
 
-os2ahci.add: $(OBJS) Makefile
-    # Target name, system and type
-    @%create $*.lnk
-    @%append $*.lnk name $*.add
-    @%append $*.lnk sys os2 dll
-    # Set various options
-    @%append $*.lnk option protmode
-    @%append $*.lnk option map
-    @%append $*.lnk option quiet
-    @%append $*.lnk option nocase
-    @%append $*.lnk option stack=0
-    # Generate directives for objects, libraries and library search-paths
-    @for %f in ($(OBJS)) do @%append $*.lnk file %f
-    @for %f in ($(LIBS)) do @%append $*.lnk lib %f
-    @for %f in ($(LIB_DIRS)) do @%append $*.lnk libpath %f
-    # Attributes for the DATA and CODE segments
-    @%append $*.lnk segment type DATA SHARED
-    @%append $*.lnk segment type CODE IOPL
-    # Order segments by class
-    @%append $*.lnk order
-    @%append $*.lnk clname 'DATA'
-    @%append $*.lnk clname 'CONST'
-    @%append $*.lnk clname 'BSS'
-    @%append $*.lnk clname 'CODE'
-    # Link the stuff together and build the target
-    wlink  @$*.lnk
-    @%erase $*.lnk
+all: directory $(O)\os2ahci.add $(O)\os2ahci.sym
 
-os2ahci.sym: os2ahci.map
-    wat2map.cmd $[@ $^*.ma1
-    $(MAPSYM) $^*.ma1
-    @%erase $^*.ma1
+directory: .symbolic
+  $(ROOT)\Tools\createpath.cmd $(O)
+
+version.h: Makefile .always
+  @%create $^@
+  @%append $^@ /* Autogenerated by Makefile */
+  @%append $^@ $#define DMAJOR $(BLD_MAJOR)
+  @%append $^@ $#define DMINOR $(BLD_MINOR)
+  @%append $^@ $#define DVENDOR "$(VENDOR)"
+  @AddToFile $^@,$#define BLD_YEAR,DATEYEAR
+  @AddToFile $^@,$#define BLD_MONTH,DATEMONTH
+  @AddToFile $^@,$#define BLD_DAY,DATEDAY
+  @AddToFile $^@,$#define BLDLEVEL,BLDLEVEL2,$(VENDOR),$(VERSION),AHCI Driver (c) %Y $(VENDOR),$(FIXPACK)
+
+$(O)\os2ahci.add: version.h $(OBJS) Makefile
+  @%create $^&.lrf
+  @%append $^&.lrf format os2 lx phys
+  @%append $^&.lrf option mixed1632,nostub,align=4
+  @%append $^&.lrf option quiet,int,verbose,nocaseexact,eliminate
+  @%append $^&.lrf option map=$^*.map
+  @%append $^&.lrf option stack=0
+  #  @%append $*.lnk option protmode
+  @%append $^&.lrf sort global
+  @%append $^&.lrf option osname='ArcaOS'
+  @%append $^&.lrf name $^@
+  @%append $^&.lrf file $(DRV32KIT)\Drv32.lib(header)
+  @for %f in ($(OBJS)) do @%append $^&.lrf file %f
+  @for %f in ($(LIBS)) do @%append $^&.lrf library %f
+  #  @%append $*.lnk segment type DATA SHARED
+  #  @%append $*.lnk segment type CODE IOPL
+  #  # Order segments by class
+  #  @%append $*.lnk order
+  #  @%append $*.lnk clname 'DATA'
+  #  @%append $*.lnk clname 'CONST'
+  #  @%append $*.lnk clname 'BSS'
+  #  @%append $*.lnk clname 'CODE'
+  @wlink @$^&.lrf
+  @%erase $^&.lrf
+
+$(O)\os2ahci.sym: $(O)\os2ahci.map
+  wat2map.cmd $[@ $^*.ma1
+  cd $(O)
+  $(MAPSYM) $^&.ma1
+  @%erase $^&.ma1
+  cd ..
+
+release: .symbolic
+  @if exist $(WPIFILE) @del $(WPIFILE)
+  @!rm -rf $(ZIPDIR)
+
+  @md $(ZIPDIR)
+
+  @md $(ZIPDIR)\pkg1
+  copy /b $(ROOT)\src\os2ahci\$(O)\os2ahci.add $(ZIPDIR)\pkg1 >NUL
+  copy /b $(ROOT)\src\os2ahci\$(O)\os2ahci.sym $(ZIPDIR)\pkg1 >NUL
+
+  @md $(ZIPDIR)\pkg20
+  @copy $(ROOT)\src\os2ahci\ReadMe.txt $(ZIPDIR)\pkg20 >NUL
+  @copy $(ROOT)\Tools\LICENSE $(ZIPDIR)\pkg20 >NUL
+
+  @md $(ZIPDIR)\wpi
+  @sed -e "s/\\X\\X\\X/\\0\\$(VERSION:.=\\)/" $(ROOT)\Tools\ahci.wis >$(ZIPDIR)\wpi\ahci.wis
+  #@copy $(ROOT)\tools\stub.exe $(ZIPDIR)\wpi >NUL
+
+  cd $(ZIPDIR)
+  @zip -r -X $(WPIFILE) *
+  @cd $(ROOT)
+  @!rm -rf $(ZIPDIR)
+
+clean: .symbolic
+  rm -f *.def *.err *.lnk version.h
+  rm $(ROOT)\AHCI-*-WPI.zip
+  @if exist Debug @!rm -r Debug
+  @if exist Retail @!rm -r Retail
+
 

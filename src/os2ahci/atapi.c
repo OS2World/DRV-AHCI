@@ -3,6 +3,7 @@
  *
  * Copyright (c) 2011 thi.guten Software Development
  * Copyright (c) 2011 Mensys B.V.
+ * Copyright (c) 2013-2018 David Azarewicz
  *
  * Authors: Christian Mueller, Markus Thielen
  *
@@ -29,7 +30,7 @@
 #include "atapi.h"
 
 /* need this for the SCSI status block */
-#include <scsi.h>
+#include <Dev32scsi.h>
 
 /* -------------------------- macros and constants ------------------------- */
 
@@ -37,9 +38,8 @@
 
 /* -------------------------- function prototypes -------------------------- */
 
-static void atapi_req_sense_pp      (IORBH _far *iorb);
-static int atapi_pad_cdb            (u8 _far *cmd_in, u16 cmd_in_len,
-                                     u8 _far *cmd_out, u16 _far *cmd_out_len);
+static void atapi_req_sense_pp(IORBH FAR16DATA *vIorb, IORBH *pIorb);
+static int atapi_pad_cdb(u8 *cmd_in, u16 cmd_in_len, u8 *cmd_out, u16 *cmd_out_len);
 
 /* ------------------------ global/static variables ------------------------ */
 
@@ -48,46 +48,49 @@ static int atapi_pad_cdb            (u8 _far *cmd_in, u16 cmd_in_len,
 /******************************************************************************
  * Get device or media geometry. This function is not expected to be called.
  */
-int atapi_get_geometry(IORBH _far *iorb, int slot)
+int atapi_get_geometry(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot)
 {
-  dprintf("atapi_get_geometry called\n");
-  iorb_seterr(iorb, IOERR_CMD_NOT_SUPPORTED);
+  DPRINTF(4,"atapi_get_geometry called\n");
+  iorb_seterr(pIorb, IOERR_CMD_NOT_SUPPORTED);
   return(-1);
 }
 
 /******************************************************************************
  * Test whether unit is ready. This function is not expected to be called.
  */
-int atapi_unit_ready(IORBH _far *iorb, int slot)
+int atapi_unit_ready(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot)
 {
-  dprintf("atapi_unit_ready called\n");
-  iorb_seterr(iorb, IOERR_CMD_NOT_SUPPORTED);
+  DPRINTF(4,"atapi_unit_ready called\n");
+  iorb_seterr(pIorb, IOERR_CMD_NOT_SUPPORTED);
   return(-1);
 }
 
 /******************************************************************************
  * Read sectors from AHCI device.
  */
-int atapi_read(IORBH _far *iorb, int slot)
+int atapi_read(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot)
 {
-  IORB_EXECUTEIO _far *io = (IORB_EXECUTEIO _far *) iorb;
+  IORB_EXECUTEIO *io = (IORB_EXECUTEIO *)pIorb;
+  SCATGATENTRY *pSGList = (SCATGATENTRY*)Far16ToFlat(io->pSGList);
   ATAPI_CDB_12 cdb;
-  AD_INFO *ai = ad_infos + iorb_unit_adapter(iorb);
+  AD_INFO *ai = ad_infos + iorb_unit_adapter(pIorb);
   USHORT count = io->BlockCount - io->BlocksXferred;
   USHORT sg_indx;
   USHORT sg_cnt;
-  int p = iorb_unit_port(iorb);
-  int d = iorb_unit_device(iorb);
+  int p = iorb_unit_port(pIorb);
+  int d = iorb_unit_device(pIorb);
   int rc;
 
-  if (io->BlockCount == 0) {
+  if (io->BlockCount == 0)
+  {
     /* NOP; return -1 without error in IORB to indicate success */
     return(-1);
   }
 
-  if (add_workspace(iorb)->unaligned) {
+  if (add_workspace(pIorb)->unaligned)
+  {
     /* unaligned S/G addresses present; need to use double buffers */
-    return(atapi_read_unaligned(iorb, slot));
+    return(atapi_read_unaligned(pIorb, slot));
   }
 
   /* translate read command to SCSI/ATAPI READ12 command.
@@ -98,9 +101,11 @@ int atapi_read(IORBH _far *iorb, int slot)
   cdb.cmd = ATAPI_CMD_READ_12;
   SET_CDB_32(cdb.lba, io->RBA + io->BlocksXferred);
 
+  DPRINTF(4, "atapi_read\n");
+
   do {
     /* update sector count (might have been updated due to S/G limitations) */
-    SET_CDB_32(cdb.trans_len, (u32) count);
+    SET_CDB_32(cdb.trans_len, count);
 
     /* update S/G count and index */
     sg_indx = ata_get_sg_indx(io);
@@ -108,32 +113,37 @@ int atapi_read(IORBH _far *iorb, int slot)
 
     /* issue command */
     rc = ata_cmd(ai, p, d, slot, ATA_CMD_PACKET,
-                 AP_ATAPI_CMD, (void _far *) &cdb, sizeof(cdb),
-                 AP_SGLIST,    io->pSGList + sg_indx, (u16) sg_cnt,
+                 AP_ATAPI_CMD, (void *) &cdb, sizeof(cdb),
+                 AP_SGLIST,    pSGList + sg_indx, sg_cnt,
                  AP_DEVICE,    0x40,
                  AP_FEATURES,  ATAPI_FEAT_DMA | ATAPI_FEAT_DMA_TO_HOST,
                  AP_END);
 
-    if (rc > 0) {
+    if (rc > 0)
+    {
       /* couldn't map all S/G elements */
       ata_max_sg_cnt(io, sg_indx, (USHORT) rc, &sg_cnt, &count);
     }
   } while (rc > 0 && sg_cnt > 0);
 
-  if (rc == 0) {
-    add_workspace(iorb)->blocks = count;
-    add_workspace(iorb)->ppfunc = ata_read_pp;
-
-  } else if (rc > 0) {
-    iorb_seterr(iorb, IOERR_CMD_SGLIST_BAD);
-
-  } else if (rc == ATA_CMD_UNALIGNED_ADDR) {
+  if (rc == 0)
+  {
+    add_workspace(pIorb)->blocks = count;
+    add_workspace(pIorb)->ppfunc = ata_read_pp;
+  }
+  else if (rc > 0)
+  {
+    iorb_seterr(pIorb, IOERR_CMD_SGLIST_BAD);
+  }
+  else if (rc == ATA_CMD_UNALIGNED_ADDR)
+  {
     /* unaligned S/G addresses detected; need to use double buffers */
-    add_workspace(iorb)->unaligned = 1;
-    return(atapi_read_unaligned(iorb, slot));
-
-  } else {
-    iorb_seterr(iorb, IOERR_CMD_ADD_SOFTWARE_FAILURE);
+    add_workspace(pIorb)->unaligned = 1;
+    return(atapi_read_unaligned(pIorb, slot));
+  }
+  else
+  {
+    iorb_seterr(pIorb, IOERR_CMD_ADD_SOFTWARE_FAILURE);
   }
 
   return(rc);
@@ -145,14 +155,14 @@ int atapi_read(IORBH _far *iorb, int slot)
  * restrictions. This doesn't happen very often but when it does, we need to
  * use a transfer buffer and copy the data manually.
  */
-int atapi_read_unaligned(IORBH _far *iorb, int slot)
+int atapi_read_unaligned(IORBH *pIorb, int slot)
 {
-  IORB_EXECUTEIO _far *io = (IORB_EXECUTEIO _far *) iorb;
-  ADD_WORKSPACE _far *aws = add_workspace(iorb);
+  IORB_EXECUTEIO *io = (IORB_EXECUTEIO *)pIorb;
+  ADD_WORKSPACE *aws = add_workspace(pIorb);
   ATAPI_CDB_12 cdb;
-  AD_INFO *ai = ad_infos + iorb_unit_adapter(iorb);
-  int p = iorb_unit_port(iorb);
-  int d = iorb_unit_device(iorb);
+  AD_INFO *ai = ad_infos + iorb_unit_adapter(pIorb);
+  int p = iorb_unit_port(pIorb);
+  int d = iorb_unit_device(pIorb);
   int rc;
 
   /* translate read command to SCSI/ATAPI READ12 command.
@@ -164,28 +174,37 @@ int atapi_read_unaligned(IORBH _far *iorb, int slot)
   SET_CDB_32(cdb.lba, io->RBA + io->BlocksXferred);
   SET_CDB_32(cdb.trans_len, 1UL);
 
+  ai->ports[p].unaligned_read_count++;
+  DPRINTF(4, "atapi_read_unaligned\n");
+
   /* allocate transfer buffer */
-  if ((aws->buf = malloc(io->BlockSize)) == NULL) {
-    iorb_seterr(iorb, IOERR_CMD_SW_RESOURCE);
+  if ((aws->buf = MemAlloc(io->BlockSize)) == NULL)
+  {
+    iorb_seterr(pIorb, IOERR_CMD_SW_RESOURCE);
     return(-1);
   }
 
   rc = ata_cmd(ai, p, d, slot, ATA_CMD_PACKET,
-               AP_ATAPI_CMD, (void _far *) &cdb, sizeof(cdb),
-               AP_VADDR,     (void _far *) aws->buf, (u16) io->BlockSize,
+               AP_ATAPI_CMD, (void *) &cdb, sizeof(cdb),
+               AP_VADDR,     (void *) aws->buf, io->BlockSize,
                AP_DEVICE,    0x40,
                AP_FEATURES,  ATAPI_FEAT_DMA | ATAPI_FEAT_DMA_TO_HOST,
                AP_END);
 
-  if (rc == 0) {
-    add_workspace(iorb)->blocks = 1;
-    add_workspace(iorb)->ppfunc = ata_read_pp;
+  if (rc == 0)
+  {
+    add_workspace(pIorb)->blocks = 1;
+    add_workspace(pIorb)->ppfunc = ata_read_pp;
 
-  } else if (rc > 0) {
-    iorb_seterr(iorb, IOERR_CMD_SGLIST_BAD);
+  }
+  else if (rc > 0)
+  {
+    iorb_seterr(pIorb, IOERR_CMD_SGLIST_BAD);
 
-  } else {
-    iorb_seterr(iorb, IOERR_CMD_ADD_SOFTWARE_FAILURE);
+  }
+  else
+  {
+    iorb_seterr(pIorb, IOERR_CMD_ADD_SOFTWARE_FAILURE);
   }
 
   return(rc);
@@ -195,42 +214,44 @@ int atapi_read_unaligned(IORBH _far *iorb, int slot)
  * Verify readability of sectors on AHCI device. This function is not expected
  * to be called.
  */
-int atapi_verify(IORBH _far *iorb, int slot)
+int atapi_verify(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot)
 {
-  ddprintf("atapi_verify called\n");
-  iorb_seterr(iorb, IOERR_CMD_NOT_SUPPORTED);
+  DPRINTF(4,"atapi_verify called\n");
+  iorb_seterr(pIorb, IOERR_CMD_NOT_SUPPORTED);
   return(-1);
 }
 
 /******************************************************************************
  * Write sectors to AHCI device. This function is not expected to be called.
  */
-int atapi_write(IORBH _far *iorb, int slot)
+int atapi_write(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot)
 {
-  ddprintf("atapi_write called\n");
-  iorb_seterr(iorb, IOERR_CMD_NOT_SUPPORTED);
+  DPRINTF(4,"atapi_write called\n");
+  iorb_seterr(pIorb, IOERR_CMD_NOT_SUPPORTED);
   return(-1);
 }
 
 /******************************************************************************
  * Execute ATAPI command.
  */
-int atapi_execute_cdb(IORBH _far *iorb, int slot)
+int atapi_execute_cdb(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot)
 {
-  IORB_ADAPTER_PASSTHRU _far *pt = (IORB_ADAPTER_PASSTHRU _far *) iorb;
+  IORB_ADAPTER_PASSTHRU *pt = (IORB_ADAPTER_PASSTHRU *)pIorb;
+  SCATGATENTRY *pSGList = (SCATGATENTRY*)Far16ToFlat(pt->pSGList);
   int rc;
   u8 cdb[ATAPI_MAX_CDB_LEN];
   u16 cdb_len;
 
-  if (pt->ControllerCmdLen > ATAPI_MAX_CDB_LEN) {
-    iorb_seterr(iorb, IOERR_CMD_SYNTAX);
+  if (pt->ControllerCmdLen > ATAPI_MAX_CDB_LEN)
+  {
+    iorb_seterr(pIorb, IOERR_CMD_SYNTAX);
     return -1;
   }
   /* AHCI requires 12 or 16 byte commands */
-  atapi_pad_cdb(pt->pControllerCmd, pt->ControllerCmdLen,
-                (u8 _far *) cdb, (u16 _far *) &cdb_len);
+  atapi_pad_cdb(Far16ToFlat(pt->pControllerCmd), pt->ControllerCmdLen, cdb, &cdb_len);
 
-  if (cdb[0] == 0x12 || cdb[0] == 0x5a) {
+  if (cdb[0] == 0x12 || cdb[0] == 0x5a)
+  {
     /* somebody sets the direction flag incorrectly for those commands */
     pt->Flags |= PT_DIRECTION_IN;
   }
@@ -239,17 +260,18 @@ int atapi_execute_cdb(IORBH _far *iorb, int slot)
    * "ADDs are not required to iterate commands through the CDB PassThru
    * mechanism:" -- Storage Device Driver Reference, Scatter/Gather Lists
    */
-  rc = ata_cmd(ad_infos + iorb_unit_adapter(iorb), iorb_unit_port(iorb),
-               iorb_unit_device(iorb), slot, ATA_CMD_PACKET,
-               AP_ATAPI_CMD, (void _far *) cdb, cdb_len,
-               AP_SGLIST, pt->pSGList, pt->cSGList,
+  rc = ata_cmd(ad_infos + iorb_unit_adapter(pIorb), iorb_unit_port(pIorb),
+               iorb_unit_device(pIorb), slot, ATA_CMD_PACKET,
+               AP_ATAPI_CMD, (void *)cdb, cdb_len,
+               AP_SGLIST, pSGList, pt->cSGList,
                AP_WRITE, !(pt->Flags & PT_DIRECTION_IN),
                AP_FEATURES, ATAPI_FEAT_DMA,
                AP_FEATURES, (pt->Flags & PT_DIRECTION_IN) ? ATAPI_FEAT_DMA_TO_HOST : 0,
                AP_END);
 
-  if (rc) {
-    iorb_seterr(iorb, IOERR_DEVICE_NONSPECIFIC);
+  if (rc)
+  {
+    iorb_seterr(pIorb, IOERR_DEVICE_NONSPECIFIC);
   }
 
   return(rc);
@@ -265,40 +287,46 @@ int atapi_execute_cdb(IORBH _far *iorb, int slot)
  *       which is triggered by an AHCI error interrupt.
  *
  */
-int atapi_req_sense(IORBH _far *iorb, int slot)
+int atapi_req_sense(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot)
 {
-  SCSI_STATUS_BLOCK _far *ssb;
-  ADD_WORKSPACE _far *aws = add_workspace(iorb);
+  SCSI_STATUS_BLOCK *ssb;
+  ADD_WORKSPACE *aws = add_workspace(pIorb);
   int rc;
   u8 cdb[ATAPI_MIN_CDB_LEN];
-  ATAPI_CDB_6 _far *pcdb = (ATAPI_CDB_6 _far *) cdb;
+  ATAPI_CDB_6 *pcdb = (ATAPI_CDB_6 *) cdb;
   size_t sense_buf_len = ATAPI_SENSE_LEN;
 
-  dprintf("atapi_req_sense\n");
+  DPRINTF(4,"atapi_req_sense\n");
 
-  if ((iorb->RequestControl & IORB_REQ_STATUSBLOCK) &&
-      iorb->StatusBlockLen >= sizeof(*ssb) && iorb->pStatusBlock != 0) {
+  if ((pIorb->RequestControl & IORB_REQ_STATUSBLOCK) &&
+      pIorb->StatusBlockLen >= sizeof(*ssb) && pIorb->pStatusBlock != 0)
+  {
+    ULONG ulTmp;
+
+    ulTmp = (CastFar16ToULONG(vIorb) & 0xffff0000) + pIorb->pStatusBlock;
+    ssb = (SCSI_STATUS_BLOCK *)Far16ToFlat(CastULONGToFar16(ulTmp));
 
     /* don't request sense data if caller asked us not to; the flag
      * STATUS_DISABLE_REQEST_SENSE is not defined in the old DDK we've been
      * using so we'll use the hard-coded value (0x0008) */
-    ssb = (SCSI_STATUS_BLOCK _far *) (((u32) iorb & 0xffff0000U) +
-                                       (u16) iorb->pStatusBlock);
-    if (ssb->Flags & 0x0008U) {
-      iorb_seterr(iorb, IOERR_DEVICE_NONSPECIFIC);
+    if (ssb->Flags & 0x0008U)
+    {
+      iorb_seterr(pIorb, IOERR_DEVICE_NONSPECIFIC);
       return(-1);
     }
 
     /* if the sense buffer requested is larger than our default, adjust
      * the length accordingly to satisfy the caller's requirements. */
-    if (ssb->SenseData != NULL && ssb->ReqSenseLen > sense_buf_len) {
+    if (ssb->SenseData != NULL && ssb->ReqSenseLen > sense_buf_len)
+    {
       sense_buf_len = ssb->ReqSenseLen;
     }
   }
 
   /* allocate sense buffer in ADD workspace */
-  if ((aws->buf = malloc(sense_buf_len)) == NULL) {
-    iorb_seterr(iorb, IOERR_CMD_SW_RESOURCE);
+  if ((aws->buf = MemAlloc(sense_buf_len)) == NULL)
+  {
+    iorb_seterr(pIorb, IOERR_CMD_SW_RESOURCE);
     return(-1);
   }
   memset(aws->buf, 0x00, sense_buf_len);
@@ -309,24 +337,26 @@ int atapi_req_sense(IORBH _far *iorb, int slot)
   pcdb->trans_len = (u8) sense_buf_len;
 
   aws->ppfunc = atapi_req_sense_pp;
-  rc = ata_cmd(ad_infos + iorb_unit_adapter(iorb),
-               iorb_unit_port(iorb),
-               iorb_unit_device(iorb),
+  rc = ata_cmd(ad_infos + iorb_unit_adapter(pIorb),
+               iorb_unit_port(pIorb),
+               iorb_unit_device(pIorb),
                slot,
                ATA_CMD_PACKET,
-               AP_ATAPI_CMD, (void _far*) cdb, sizeof(cdb),
-               AP_VADDR, (void _far *) aws->buf, sense_buf_len,
+               AP_ATAPI_CMD, (void *)cdb, sizeof(cdb),
+               AP_VADDR, (void *)aws->buf, sense_buf_len,
                AP_FEATURES,  ATAPI_FEAT_DMA,
                AP_END);
 
-  if (rc > 0) {
-    iorb_seterr(iorb, IOERR_CMD_SGLIST_BAD);
-
-  } else if (rc < 0) {
+  if (rc > 0)
+  {
+    iorb_seterr(pIorb, IOERR_CMD_SGLIST_BAD);
+  }
+  else if (rc < 0)
+  {
     /* we failed to get info about an error -> return
      * non specific device error
      */
-    iorb_seterr(iorb, IOERR_DEVICE_NONSPECIFIC);
+    iorb_seterr(pIorb, IOERR_DEVICE_NONSPECIFIC);
   }
 
   return(rc);
@@ -336,73 +366,76 @@ int atapi_req_sense(IORBH _far *iorb, int slot)
  * Post processing function for ATAPI request sense; examines the sense
  * data returned and maps sense info to IORB error info.
  */
-static void atapi_req_sense_pp(IORBH _far *iorb)
+static void atapi_req_sense_pp(IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
-  SCSI_STATUS_BLOCK _far *ssb;
-  ADD_WORKSPACE _far *aws = add_workspace(iorb);
+  SCSI_STATUS_BLOCK *ssb;
+  ADD_WORKSPACE *aws = add_workspace(pIorb);
   ATAPI_SENSE_DATA *psd = (ATAPI_SENSE_DATA *) aws->buf;
 
-  dphex(psd, sizeof(*psd), "sense buffer:\n");
+  DHEXDUMP(5,psd, sizeof(*psd), "sense buffer:\n");
 
-  if ((iorb->RequestControl & IORB_REQ_STATUSBLOCK) &&
-      iorb->StatusBlockLen >= sizeof(*ssb) && iorb->pStatusBlock != 0) {
+  if ((pIorb->RequestControl & IORB_REQ_STATUSBLOCK) &&
+      pIorb->StatusBlockLen >= sizeof(*ssb) && pIorb->pStatusBlock != 0)
+  {
+    ULONG ulTmp;
 
     /* copy sense data to IORB */
-    ssb = (SCSI_STATUS_BLOCK _far *) (((u32) iorb & 0xffff0000U) +
-                                       (u16) iorb->pStatusBlock);
+    ulTmp = (CastFar16ToULONG(vIorb) & 0xffff0000) + pIorb->pStatusBlock;
+    ssb = (SCSI_STATUS_BLOCK *)Far16ToFlat(CastULONGToFar16(ulTmp));
     ssb->AdapterErrorCode = 0;
     ssb->TargetStatus = SCSI_STAT_CHECKCOND;
     ssb->ResidualLength = 0;
     memset(ssb->AdapterDiagInfo, 0x00, sizeof(ssb->AdapterDiagInfo));
 
-    if (ssb->SenseData != NULL) {
-      memcpy(ssb->SenseData, psd, ssb->ReqSenseLen);
+    if (ssb->SenseData != NULL)
+    {
+      memcpy(Far16ToFlat(ssb->SenseData), psd, ssb->ReqSenseLen);
       ssb->Flags |= STATUS_SENSEDATA_VALID;
     }
-    iorb->Status |= IORB_STATUSBLOCK_AVAIL;
+    pIorb->Status |= IORB_STATUSBLOCK_AVAIL;
   }
 
   /* map sense data to some IOERR_ value */
-  switch (ATAPI_GET_SENSE(psd)) {
-
+  switch (ATAPI_GET_SENSE(psd))
+  {
   case ASENSE_NO_SENSE:
   case ASENSE_RECOVERED_ERROR:
     /* no error; this shouldn't happen because we'll only call
      * atapi_req_sense() if we received an error interrupt */
-    iorb_seterr(iorb, IOERR_DEVICE_NONSPECIFIC);
+    iorb_seterr(pIorb, IOERR_DEVICE_NONSPECIFIC);
     break;
 
   case ASENSE_NOT_READY:
-    iorb_seterr(iorb, IOERR_UNIT_NOT_READY);
+    iorb_seterr(pIorb, IOERR_UNIT_NOT_READY);
     break;
 
   case ASENSE_UNIT_ATTENTION:
-    iorb_seterr(iorb, IOERR_MEDIA_CHANGED);
+    iorb_seterr(pIorb, IOERR_MEDIA_CHANGED);
     break;
 
   case ASENSE_MEDIUM_ERROR:
-    iorb_seterr(iorb, IOERR_MEDIA);
+    iorb_seterr(pIorb, IOERR_MEDIA);
     break;
 
   case ASENSE_ILLEGAL_REQUEST:
-    iorb_seterr(iorb, IOERR_CMD_SYNTAX);
+    iorb_seterr(pIorb, IOERR_CMD_SYNTAX);
     break;
 
   case ASENSE_DATA_PROTECT:
-    iorb_seterr(iorb, IOERR_MEDIA_WRITE_PROTECT);
+    iorb_seterr(pIorb, IOERR_MEDIA_WRITE_PROTECT);
     break;
 
   case ASENSE_BLANK_CHECK:
-    iorb_seterr(iorb, IOERR_MEDIA_NOT_FORMATTED);
+    iorb_seterr(pIorb, IOERR_MEDIA_NOT_FORMATTED);
     break;
 
   case ASENSE_ABORTED_COMMAND:
   case ASENSE_COPY_ABORTED:
-    iorb_seterr(iorb, IOERR_CMD_ABORTED);
+    iorb_seterr(pIorb, IOERR_CMD_ABORTED);
     break;
 
   default:
-    iorb_seterr(iorb, IOERR_DEVICE_NONSPECIFIC);
+    iorb_seterr(pIorb, IOERR_DEVICE_NONSPECIFIC);
     break;
   }
 
@@ -417,13 +450,13 @@ static void atapi_req_sense_pp(IORBH _far *iorb)
  * cmd_out buffer is expected to be ATAPI_MAX_CDB_LEN in size.
  * returns 0 on success, != 0 if the command can't be converted.
  */
-int atapi_pad_cdb(u8 _far *cmd_in, u16 cmd_in_len,
-                  u8 _far *cmd_out, u16 _far *cmd_out_len)
+int atapi_pad_cdb(u8 *cmd_in, u16 cmd_in_len, u8 *cmd_out, u16 *cmd_out_len)
 {
-  ATAPI_CDB_12 _far *p12;
+  ATAPI_CDB_12 *p12;
   u32 tmp;
 
-  if (cmd_in_len == ATAPI_MIN_CDB_LEN || cmd_in_len == ATAPI_MAX_CDB_LEN) {
+  if (cmd_in_len == ATAPI_MIN_CDB_LEN || cmd_in_len == ATAPI_MAX_CDB_LEN)
+  {
     /* command does not need to be converted */
     memcpy(cmd_out, cmd_in, cmd_in_len);
     *cmd_out_len = cmd_in_len;
@@ -431,13 +464,13 @@ int atapi_pad_cdb(u8 _far *cmd_in, u16 cmd_in_len,
   }
 
   memset(cmd_out, 0x00, ATAPI_MAX_CDB_LEN);
-  p12 = (ATAPI_CDB_12 _far *) cmd_out;
+  p12 = (ATAPI_CDB_12 *) cmd_out;
   /* we always convert to 12 byte CDBs */
   *cmd_out_len = ATAPI_MIN_CDB_LEN;
 
   /* check if command can be converted */
-  switch (cmd_in[0]) {
-
+  switch (cmd_in[0])
+  {
   case ATAPI_CMD_READ_6:
   case ATAPI_CMD_WRITE_6:
     /* convert from 6 to 12 byte equivalent */
@@ -445,7 +478,7 @@ int atapi_pad_cdb(u8 _far *cmd_in, u16 cmd_in_len,
     p12->flags = cmd_in[1] & 0xc0; /* 6byte cmds have no flags (FUA etc.) */
     tmp = GET_CDB_24(cmd_in + 1) & 0x1fffffUL;
     SET_CDB_32(p12->lba, tmp);
-    SET_CDB_32(p12->trans_len, (u32)(cmd_in[4]));
+    SET_CDB_32(p12->trans_len, (cmd_in[4]));
     p12->control = cmd_in[5];
     break;
 

@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2011 thi.guten Software Development
  * Copyright (c) 2011 Mensys B.V.
- * Portions copyright (c) 2013 David Azarewicz
+ * Copyright (c) 2013-2018 David Azarewicz
  *
  * Authors: Christian Mueller, Markus Thielen
  *
@@ -34,12 +34,12 @@
 
 /* -------------------------- function prototypes -------------------------- */
 
-static int ata_cmd_read (IORBH _far *iorb, AD_INFO *ai, int p, int d, int slot,
-                         ULONG sector, ULONG count, SCATGATENTRY _far *sg_list,
-                         ULONG sg_cnt);
+static int ata_cmd_read(IORBH *pIorb, AD_INFO *ai, int p, int d, int slot,
+                        ULONG sector, ULONG count, SCATGATENTRY *sg_list,
+                        ULONG sg_cnt);
 
-static int ata_cmd_write(IORBH _far *iorb, AD_INFO *ai, int p, int d, int slot,
-                         ULONG sector, ULONG count, SCATGATENTRY _far *sg_list,
+static int ata_cmd_write(IORBH *pIorb, AD_INFO *ai, int p, int d, int slot,
+                         ULONG sector, ULONG count, SCATGATENTRY *sg_list,
                          ULONG sg_cnt, int write_through);
 
 /* ------------------------ global/static variables ------------------------ */
@@ -80,20 +80,20 @@ int ata_cmd(AD_INFO *ai, int p, int d, int slot, int cmd, ...)
 
 int v_ata_cmd(AD_INFO *ai, int p, int d, int slot, int cmd, va_list va)
 {
-  AHCI_PORT_DMA _far *dma_base_virt;
-  AHCI_CMD_HDR _far *cmd_hdr;
-  AHCI_CMD_TBL _far *cmd_tbl;
-  SCATGATENTRY _far *sg_list = NULL;
+  AHCI_PORT_DMA *dma_base_virt;
+  AHCI_CMD_HDR *cmd_hdr;
+  AHCI_CMD_TBL *cmd_tbl;
+  SCATGATENTRY *sg_list = NULL;
   SCATGATENTRY sg_single;
   ATA_PARM ap;
   ATA_CMD ata_cmd;
-  void _far *atapi_cmd = NULL;
+  void *atapi_cmd = NULL;
   u32 dma_base_phys;
-  u16 atapi_cmd_len = 0;
-  u16 ahci_flags = 0;
-  u16 sg_cnt = 0;
-  int i;
-  int n;
+  u32 atapi_cmd_len = 0;
+  u32 ahci_flags = 0;
+  u32 sg_cnt = 0;
+  u32 i;
+  u32 n;
 
   /* --------------------------------------------------------------------------
    * Initialize ATA command. The ATA command is set up with the main command
@@ -101,37 +101,41 @@ int v_ata_cmd(AD_INFO *ai, int p, int d, int slot, int cmd, va_list va)
    * address, transfer count, ...
    */
   memset(&ata_cmd, 0x00, sizeof(ata_cmd));
-  ata_cmd.cmd = (u8) cmd;
+  ata_cmd.cmd = cmd;
 
   /* parse variable arguments */
-  do {
-    switch ((ap = va_arg(va, ATA_PARM))) {
+  do
+  {
+    switch ((ap = va_arg(va, ATA_PARM)))
+    {
 
     case AP_AHCI_FLAGS:
-      ahci_flags |= va_arg(va, u16);
+      ahci_flags |= va_arg(va, u32);
       break;
 
     case AP_WRITE:
-      if (va_arg(va, u16) != 0) {
+      if (va_arg(va, u32) != 0)
+      {
         ahci_flags |= AHCI_CMD_WRITE;
       }
       break;
 
     case AP_FEATURES:
       /* ATA features word */
-      ata_cmd.features |= va_arg(va, u16);
+      ata_cmd.features |= va_arg(va, u32);
       break;
 
     case AP_COUNT:
       /* transfer count */
-      ata_cmd.count = va_arg(va, u16);
+      ata_cmd.count = va_arg(va, u32);
       break;
 
     case AP_SECTOR_28:
       /* 28-bit sector address */
       ata_cmd.lba_l = va_arg(va, u32);
-      if (ata_cmd.lba_l & 0xf0000000UL) {
-        dprintf("error: LBA-28 address %ld has more than 28 bits\n", ata_cmd.lba_l);
+      if (ata_cmd.lba_l & 0xf0000000UL)
+      {
+        dprintf(0,"error: LBA-28 address %d has more than 28 bits\n", ata_cmd.lba_l);
         return(ATA_CMD_INVALID_PARM);
       }
       /* add upper 4 bits to device field */
@@ -143,46 +147,46 @@ int v_ata_cmd(AD_INFO *ai, int p, int d, int slot, int cmd, va_list va)
     case AP_SECTOR_48:
       /* 48-bit sector address */
       ata_cmd.lba_l = va_arg(va, u32);
-      ata_cmd.lba_h = va_arg(va, u16);
+      ata_cmd.lba_h = va_arg(va, u32);
       break;
 
     case AP_DEVICE:
       /* ATA device byte; note that this byte contains the highest
        * 4 bits of LBA-28 address; we have to leave them alone here. */
-      ata_cmd.device |= va_arg(va, u16) & 0xf0U;
+      ata_cmd.device |= va_arg(va, u32) & 0xf0;
       break;
 
     case AP_SGLIST:
       /* scatter/gather list in SCATGATENTRY/count format */
-      sg_list = va_arg(va, void _far *);
-      sg_cnt = va_arg(va, u16);
+      sg_list = va_arg(va, void *);
+      sg_cnt = va_arg(va, u32);
       break;
 
     case AP_VADDR:
       /* virtual buffer address in addr/len format (up to 4K) */
-      sg_single.ppXferBuf = virt_to_phys(va_arg(va, void _far *));
-      sg_single.XferBufLen = va_arg(va, u16);
+      sg_single.ppXferBuf = MemPhysAdr(va_arg(va, void *));
+      sg_single.XferBufLen = va_arg(va, u32);
       sg_list = &sg_single;
       sg_cnt = 1;
       break;
 
     case AP_ATAPI_CMD:
       /* ATAPI command */
-      atapi_cmd = va_arg(va, void _far *);
-      atapi_cmd_len = va_arg(va, u16);
+      atapi_cmd = va_arg(va, void *);
+      atapi_cmd_len = va_arg(va, u32);
       ahci_flags |= AHCI_CMD_ATAPI;
       break;
 
     case AP_ATA_CMD:
       /* ATA command "pass-through" */
-      memcpy(&ata_cmd, va_arg(va, void _far *), sizeof(ATA_CMD));
+      memcpy(&ata_cmd, va_arg(va, void *), sizeof(ATA_CMD));
       break;
 
     case AP_END:
       break;
 
     default:
-      dprintf("error: v_ata_cmd() called with invalid parameter type (%d)\n", (int) ap);
+      dprintf(0,"error: v_ata_cmd() called with invalid parameter type (%d)\n", (int) ap);
       return(ATA_CMD_INVALID_PARM);
     }
 
@@ -211,19 +215,21 @@ int v_ata_cmd(AD_INFO *ai, int p, int d, int slot, int cmd, va_list va)
   dma_base_phys = port_dma_base_phys(ai, p);
 
   /* AHCI command header */
-  cmd_hdr = dma_base_virt->cmd_hdr + slot;
+  cmd_hdr = &dma_base_virt->cmd_hdr[slot];
   memset(cmd_hdr, 0x00, sizeof(*cmd_hdr));
   cmd_hdr->options  = ((d & 0x0f) << 12);
   cmd_hdr->options |= ahci_flags;  /* AHCI command flags */
   cmd_hdr->options |= 5;           /* length of command FIS in 32-bit words */
   cmd_hdr->tbl_addr = dma_base_phys + offsetof(AHCI_PORT_DMA, cmd_tbl[slot]);
+  /* DAZ can use MemPhysAdr(&dma_base_virt->cmd_tbl[slot]), but is probably slower. */
 
   /* AHCI command table */
-  cmd_tbl = dma_base_virt->cmd_tbl + slot;
+  cmd_tbl = &dma_base_virt->cmd_tbl[slot];
   memset(cmd_tbl, 0x00, sizeof(*cmd_tbl));
   ata_cmd_to_fis(cmd_tbl->cmd_fis, &ata_cmd, d);
 
-  if (atapi_cmd != NULL) {
+  if (atapi_cmd != NULL)
+  {
     /* copy ATAPI command */
     memcpy(cmd_tbl->atapi_cmd, atapi_cmd, atapi_cmd_len);
   }
@@ -249,20 +255,23 @@ int v_ata_cmd(AD_INFO *ai, int p, int d, int slot, int cmd, va_list va)
    *    of this function will indicate how many OS/2 S/G entries were
    *    successfully mapped.
    */
-  for (i = n = 0; i < sg_cnt; i++) {
+  for (i = n = 0; i < sg_cnt; i++)
+  {
     u32 sg_addr = sg_list[i].ppXferBuf;
     u32 sg_size = sg_list[i].XferBufLen;
 
-    do {
-      u32 chunk = (sg_size > AHCI_MAX_SG_ELEMENT_LEN) ? AHCI_MAX_SG_ELEMENT_LEN
-                                                      : sg_size;
-      if (n >= AHCI_MAX_SG) {
+    do
+    {
+      u32 chunk = (sg_size > AHCI_MAX_SG_ELEMENT_LEN) ? AHCI_MAX_SG_ELEMENT_LEN : sg_size;
+      if (n >= AHCI_MAX_SG)
+      {
         /* couldn't store all S/G elements in our DMA buffer */
-        ddprintf("ata_cmd(): too many S/G elements\n");
+        dprintf(0,"ata_cmd(): too many S/G elements\n");
         return(i - 1);
       }
-      if ((sg_addr & 1) || (chunk & 1)) {
-        ddprintf("error: ata_cmd() called with unaligned S/G element(s)\n");
+      if ((sg_addr & 1) || (chunk & 1))
+      {
+        DPRINTF(0,"warning: ata_cmd() called with unaligned S/G element(s)\n");
         return(ATA_CMD_UNALIGNED_ADDR);
       }
       cmd_tbl->sg_list[n].addr = sg_addr;
@@ -274,19 +283,24 @@ int v_ata_cmd(AD_INFO *ai, int p, int d, int slot, int cmd, va_list va)
   }
 
   /* set final S/G count in AHCI command header */
-  cmd_hdr->options |= (u32) n << 16;
+  cmd_hdr->options |= n << 16;
 
-  if (debug >= 2) {
-    aprintf("ATA command for %d.%d.%d, slot %d:\n", ad_no(ai), p, d, slot);
-    phex(cmd_hdr, offsetof(AHCI_CMD_HDR, reserved), "cmd_hdr:   ");
-    phex(&ata_cmd, sizeof(ata_cmd), "ata_cmd:   ");
-    if (atapi_cmd != NULL) {
-      phex(atapi_cmd, atapi_cmd_len, "atapi_cmd: ");
+  #ifdef DEBUG
+  if ((D32g_DbgLevel >= 5) /*|| (atapi_cmd != NULL)*/)
+  {
+    DPRINTF(0,"ATA command for %d.%d.%d, slot %d:\n", ad_no(ai), p, d, slot);
+    dHexDump(0,cmd_hdr, offsetof(AHCI_CMD_HDR, reserved), "cmd_hdr: ");
+    dHexDump(0,&ata_cmd, sizeof(ata_cmd), "ata_cmd: ");
+    if (atapi_cmd != NULL)
+    {
+      dHexDump(0,atapi_cmd, atapi_cmd_len, "atapi_cmd: ");
     }
-    if (n > 0) {
-      phex(cmd_tbl->sg_list, sizeof(*cmd_tbl->sg_list) * n, "sg_list:   ");
+    if (n > 0)
+    {
+      dHexDump(0,cmd_tbl->sg_list, sizeof(*cmd_tbl->sg_list) * n, "sg_list: ");
     }
   }
+  #endif
 
   return(ATA_CMD_SUCCESS);
 }
@@ -311,7 +325,7 @@ int v_ata_cmd(AD_INFO *ai, int p, int d, int slot, int cmd, va_list va)
  *  16   |   Reserved     |   Reserved     |   Reserved     |  Reserved      |
  *       +----------------+----------------+----------------+----------------+
  */
-void ata_cmd_to_fis(u8 _far *fis, ATA_CMD _far *ata_cmd, int d)
+void ata_cmd_to_fis(u8 *fis, ATA_CMD *ata_cmd, int d)
 {
   fis[0]  = 0x27;                  /* register - host to device FIS */
   fis[1]  = (u8) (d & 0xf);        /* port multiplier number */
@@ -343,13 +357,15 @@ void ata_cmd_to_fis(u8 _far *fis, ATA_CMD _far *ata_cmd, int d)
  *       S/G lists into multiple commands can be done without editing the S/G
  *       lists.
  */
-u16 ata_get_sg_indx(IORB_EXECUTEIO _far *io)
+u16 ata_get_sg_indx(IORB_EXECUTEIO *io)
 {
   ULONG offset = io->BlocksXferred * io->BlockSize;
+  SCATGATENTRY *pSGList = (SCATGATENTRY*)Far16ToFlat(io->pSGList);
   USHORT i;
 
-  for (i = 0; i < io->cSGList && offset > 0; i++) {
-    offset -= io->pSGList[i].XferBufLen;
+  for (i = 0; i < io->cSGList && offset > 0; i++)
+  {
+    offset -= pSGList[i].XferBufLen;
   }
 
   return(i);
@@ -379,22 +395,26 @@ u16 ata_get_sg_indx(IORB_EXECUTEIO _far *io)
  *       maximum number of S/G elements that can be mapped on sector
  *       boundaries which will still fit into our HW S/G list.
  */
-void ata_max_sg_cnt(IORB_EXECUTEIO _far *io, USHORT sg_indx, USHORT sg_max,
-                    USHORT _far *sg_cnt, USHORT _far *sector_cnt)
+void ata_max_sg_cnt(IORB_EXECUTEIO *io, USHORT sg_indx, USHORT sg_max,
+                    USHORT *sg_cnt, USHORT *sector_cnt)
 {
   ULONG max_sector_cnt = 0;
   USHORT max_sg_cnt = 0;
   ULONG offset = 0;
   USHORT i;
+  SCATGATENTRY *pSGList = (SCATGATENTRY*)Far16ToFlat(io->pSGList);
 
-  for (i = sg_indx; i < io->cSGList; i++) {
-    if (i - sg_indx >= sg_max) {
+  for (i = sg_indx; i < io->cSGList; i++)
+  {
+    if (i - sg_indx >= sg_max)
+    {
       /* we're beyond the number of S/G elements we can map */
       break;
     }
 
-    offset += io->pSGList[i].XferBufLen;
-    if (offset % io->BlockSize == 0) {
+    offset += pSGList[i].XferBufLen;
+    if (offset % io->BlockSize == 0)
+    {
       /* this S/G element ends on a sector boundary */
       max_sector_cnt = offset / io->BlockSize;
       max_sg_cnt = i + 1;
@@ -413,29 +433,31 @@ void ata_max_sg_cnt(IORB_EXECUTEIO _far *io, USHORT sg_indx, USHORT sg_max,
  * ATA devices we're dealing with (hard disks). ATAPI is a different story
  * and handled by atapi_get_geometry().
  */
-int ata_get_geometry(IORBH _far *iorb, int slot)
+int ata_get_geometry(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot)
 {
-  ADD_WORKSPACE _far *aws = add_workspace(iorb);
+  ADD_WORKSPACE *aws = add_workspace(pIorb);
   int rc;
 
   /* allocate buffer for ATA identify information */
-  if ((aws->buf = malloc(ATA_ID_WORDS * sizeof(u16))) == NULL) {
-    iorb_seterr(iorb, IOERR_CMD_SW_RESOURCE);
+  if ((aws->buf = MemAlloc(ATA_ID_WORDS * sizeof(u16))) == NULL)
+  {
+    iorb_seterr(pIorb, IOERR_CMD_SW_RESOURCE);
     return(-1);
   }
 
   /* request ATA identify information */
   aws->ppfunc = ata_get_geometry_pp;
-  rc = ata_cmd(ad_infos + iorb_unit_adapter(iorb),
-               iorb_unit_port(iorb),
-               iorb_unit_device(iorb),
+  rc = ata_cmd(ad_infos + iorb_unit_adapter(pIorb),
+               iorb_unit_port(pIorb),
+               iorb_unit_device(pIorb),
                slot,
                ATA_CMD_ID_ATA,
-               AP_VADDR, (void _far *) aws->buf, ATA_ID_WORDS * sizeof(u16),
+               AP_VADDR, (void *) aws->buf, ATA_ID_WORDS * sizeof(u16),
                AP_END);
 
-  if (rc != 0) {
-    iorb_seterr(iorb, IOERR_CMD_ADD_SOFTWARE_FAILURE);
+  if (rc != 0)
+  {
+    iorb_seterr(pIorb, IOERR_CMD_ADD_SOFTWARE_FAILURE);
   }
 
   return(rc);
@@ -444,18 +466,21 @@ int ata_get_geometry(IORBH _far *iorb, int slot)
 /* Adjust the cylinder count in the physical
  * geometry to the last full cylinder.
  */
-int adjust_cylinders(GEOMETRY _far *geometry, ULONG TotalSectors) {
+int adjust_cylinders(GEOMETRY *geometry, ULONG TotalSectors)
+{
   USHORT SecPerCyl;
   int rc = FALSE;
 
   geometry->TotalSectors = TotalSectors;
   SecPerCyl = geometry->SectorsPerTrack * geometry->NumHeads;
-  if (SecPerCyl > 0) {
+  if (SecPerCyl > 0)
+  {
     ULONG TotalCylinders  = TotalSectors / SecPerCyl;
 
     geometry->TotalSectors   = TotalCylinders * SecPerCyl;
     geometry->TotalCylinders = TotalCylinders;
-    if (TotalCylinders >> 16) {
+    if (TotalCylinders >> 16)
+    {
       geometry->TotalCylinders = 65535;
       rc = TRUE;
     }
@@ -469,13 +494,14 @@ int adjust_cylinders(GEOMETRY _far *geometry, ULONG TotalSectors) {
 #define BIOS_MAX_CYLINDERS       1024l
 #define BIOS_MAX_NUMHEADS         255
 #define BIOS_MAX_SECTORSPERTRACK   63
-void log_geom_calculate_LBA_assist(GEOMETRY _far *geometry, ULONG TotalSectors)
+void log_geom_calculate_LBA_assist(GEOMETRY *geometry, ULONG TotalSectors)
 {
   UCHAR numSpT   = BIOS_MAX_SECTORSPERTRACK;
   UCHAR numHeads = BIOS_MAX_NUMHEADS;
   ULONG Cylinders;
 
-  if (TotalSectors <= (BIOS_MAX_CYLINDERS * 128 * BIOS_MAX_SECTORSPERTRACK)) {
+  if (TotalSectors <= (BIOS_MAX_CYLINDERS * 128 * BIOS_MAX_SECTORSPERTRACK))
+  {
     USHORT temp = (TotalSectors - 1) / (BIOS_MAX_CYLINDERS * BIOS_MAX_SECTORSPERTRACK);
 
     if (temp < 16)      numHeads = 16;
@@ -484,9 +510,11 @@ void log_geom_calculate_LBA_assist(GEOMETRY _far *geometry, ULONG TotalSectors)
     else                numHeads = 128;
   }
 
-  do {
+  do
+  {
     Cylinders = TotalSectors / (USHORT)(numHeads * numSpT);
-    if (Cylinders >> 16) {
+    if (Cylinders >> 16)
+    {
       if (numSpT < 128)
         numSpT = (numSpT << 1) | 1;
       else
@@ -499,26 +527,27 @@ void log_geom_calculate_LBA_assist(GEOMETRY _far *geometry, ULONG TotalSectors)
   geometry->SectorsPerTrack = numSpT;
 }
 
-int check_lvm(IORBH _far *iorb, ULONG sector)
+int check_lvm(IORBH *pIorb, ULONG sector)
 {
-  DLA_Table_Sector *pDLA = (DLA_Table_Sector*)add_workspace(iorb)->buf;
-  AD_INFO *ai = ad_infos + iorb_unit_adapter(iorb);
-  GEOMETRY _far *geometry = ((IORB_GEOMETRY _far *) iorb)->pGeometry;
-  int p = iorb_unit_port(iorb);
+  DLA_Table_Sector *pDLA = (DLA_Table_Sector*)add_workspace(pIorb)->buf;
+  AD_INFO *ai = ad_infos + iorb_unit_adapter(pIorb);
+  GEOMETRY *geometry = ((IORB_GEOMETRY*)pIorb)->pGeometry;
+  int p = iorb_unit_port(pIorb);
   int rc;
 
   rc = ahci_exec_polled_cmd(ai, p, 0, 500, ATA_CMD_READ,
-         AP_SECTOR_28, (u32) sector-1,
-         AP_COUNT, (u16) 1,
-         AP_VADDR, (void _far *) pDLA, 512,
+         AP_SECTOR_28, sector-1,
+         AP_COUNT, 1,
+         AP_VADDR, (void *)pDLA, 512,
          AP_DEVICE, 0x40,
          AP_END);
   if (rc) return 0;
 
-  ddphex(pDLA, sizeof(DLA_Table_Sector), "DLA sector %d:\n", sector-1);
+  DHEXDUMP(5,pDLA, sizeof(DLA_Table_Sector), "DLA sector %d:\n", sector-1);
 
-  if ((pDLA->DLA_Signature1 == DLA_TABLE_SIGNATURE1) && (pDLA->DLA_Signature2 == DLA_TABLE_SIGNATURE2)) {
-    ddprintf("is_lvm_geometry found at sector %d\n", sector-1);
+  if ((pDLA->DLA_Signature1 == DLA_TABLE_SIGNATURE1) && (pDLA->DLA_Signature2 == DLA_TABLE_SIGNATURE2))
+  {
+    DPRINTF(3,__func__": DLA found at sector %d\n", sector-1);
     geometry->TotalCylinders = pDLA->Cylinders;
     geometry->NumHeads = pDLA->Heads_Per_Cylinder;
     geometry->SectorsPerTrack = pDLA->Sectors_Per_Track;
@@ -535,28 +564,27 @@ int check_lvm(IORBH _far *iorb, ULONG sector)
  * calculate the geometry during ahci_scan_ports and save it away and then just
  * return the saved values when ata_get_geometry() is called.
  */
-int is_lvm_geometry(IORBH _far *iorb)
+int is_lvm_geometry(IORBH *pIorb)
 {
-  GEOMETRY _far *geometry = ((IORB_GEOMETRY _far *) iorb)->pGeometry;
+  GEOMETRY *geometry = ((IORB_GEOMETRY*)pIorb)->pGeometry;
   ULONG sector;
 
   if (init_complete) return 0; /* We cannot use ahci_exec_polled_cmd() after init_complete */
 
-  if (use_lvm_info) {
-    #ifdef DEBUG
-    AD_INFO *ai = ad_infos + iorb_unit_adapter(iorb);
-    int p = iorb_unit_port(iorb);
-    int d = iorb_unit_device(iorb);
-    ddprintf("is_lvm_geometry (%d.%d.%d)\n", ad_no(ai), p, d);
-    #endif
+  #ifdef DEBUG
+  AD_INFO *ai = ad_infos + iorb_unit_adapter(pIorb);
+  int p = iorb_unit_port(pIorb);
+  int d = iorb_unit_device(pIorb);
+  DPRINTF(3,__func__" (%d.%d.%d)\n", ad_no(ai), p, d);
+  #endif
 
-    /* First check the sector reported by the hardware */
-    if (check_lvm(iorb, geometry->SectorsPerTrack)) return 1;
+  /* First check the sector reported by the hardware */
+  if (check_lvm(pIorb, geometry->SectorsPerTrack)) return 1;
 
-    for (sector = 255; sector >= 63; sector >>= 1) {
-      if (sector == geometry->SectorsPerTrack) continue;
-      if (check_lvm(iorb, sector)) return 1;
-    }
+  for (sector = 255; sector >= 63; sector >>= 1)
+  {
+    if (sector == geometry->SectorsPerTrack) continue;
+    if (check_lvm(pIorb, sector)) return 1;
   }
 
   return 0;
@@ -566,13 +594,13 @@ int is_lvm_geometry(IORBH _far *iorb)
  * Post processing function for ata_get_geometry(): convert the ATA identify
  * information to OS/2 IOCC_GEOMETRY information.
  */
-void ata_get_geometry_pp(IORBH _far *iorb)
+void ata_get_geometry_pp(IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
-  GEOMETRY _far *geometry = ((IORB_GEOMETRY _far *) iorb)->pGeometry;
-  USHORT geometry_len =  ((IORB_GEOMETRY _far *) iorb)->GeometryLen;
-  u16 *id_buf = add_workspace(iorb)->buf;
-  int a = iorb_unit_adapter(iorb);
-  int p = iorb_unit_port(iorb);
+  GEOMETRY *geometry = ((IORB_GEOMETRY*)pIorb)->pGeometry;
+  USHORT geometry_len =  ((IORB_GEOMETRY *)pIorb)->GeometryLen;
+  u16 *id_buf = add_workspace(pIorb)->buf;
+  int a = iorb_unit_adapter(pIorb);
+  int p = iorb_unit_port(pIorb);
   char *Method;
 
   /* Fill-in geometry information; the ATA-8 spec declares the geometry
@@ -601,30 +629,41 @@ void ata_get_geometry_pp(IORBH _far *iorb)
    * raise this limit to something like 8TB but this is not really much of a
    * difference. Maybe there's something in later DDKs that allows more than
    * 32 bits?
+   *
+   * Warning: Do not change the algorithm for calculating disk geometry without
+   * fully understaing the consequences. Side effects of even slight changes
+   * can be unexpected and catastrophic.
    */
   memset(geometry, 0x00, geometry_len);
   geometry->BytesPerSector = ATA_SECTOR_SIZE;
 
   /* extract total number of sectors */
-  if (id_buf[ATA_ID_CFS_ENABLE_2] & 0x400) {
+  if (id_buf[ATA_ID_CFS_ENABLE_2] & 0x400)
+  {
     /* 48-bit LBA supported */
-    if (ATA_CAPACITY48_H(id_buf) != 0) {
+    if (ATA_CAPACITY48_H(id_buf) != 0)
+    {
       /* more than 32 bits for number of sectors */
-      dprintf("warning: limiting disk %d.%d.%d to 2TB\n",
-              iorb_unit_adapter(iorb), iorb_unit_port(iorb),
-              iorb_unit_device(iorb));
+      dprintf(0,"warning: limiting disk %d.%d.%d to 2TB\n",
+              iorb_unit_adapter(pIorb), iorb_unit_port(pIorb),
+              iorb_unit_device(pIorb));
       geometry->TotalSectors = 0xffffffffUL;
-    } else {
+    }
+    else
+    {
       geometry->TotalSectors = ATA_CAPACITY48_L(id_buf);
     }
-  } else {
+  }
+  else
+  {
     /* 28-bit LBA */
     geometry->TotalSectors = ATA_CAPACITY(id_buf) & 0x0fffffffUL;
   }
 
   Method = "None";
   /* fabricate the remaining geometry fields */
-  if (track_size[a][p] != 0) {
+  if (track_size[a][p] != 0)
+  {
     /* A specific track size has been requested for this port; this is
      * typically done for disks with 4K sectors to make sure partitions
      * start on 8-sector boundaries (parameter "/4").
@@ -633,20 +672,26 @@ void ata_get_geometry_pp(IORBH _far *iorb)
     geometry->SectorsPerTrack = track_size[a][p];
     geometry->TotalCylinders  = geometry->TotalSectors / ((u32) geometry->NumHeads * (u32) geometry->SectorsPerTrack);
     Method = "Custom";
-  } else if (CUR_HEADS(id_buf) > 0 && CUR_CYLS(id_buf) > 0 && CUR_SECTORS(id_buf) > 0 &&
-             CUR_CAPACITY(id_buf) == (u32) CUR_HEADS(id_buf) * (u32) CUR_CYLS(id_buf) * (u32) CUR_SECTORS(id_buf)) {
+  }
+  else if (CUR_HEADS(id_buf) > 0 && CUR_CYLS(id_buf) > 0 && CUR_SECTORS(id_buf) > 0 &&
+             CUR_CAPACITY(id_buf) == (u32) CUR_HEADS(id_buf) * (u32) CUR_CYLS(id_buf) * (u32) CUR_SECTORS(id_buf))
+  {
     /* BIOS-supplied (aka "current") geometry values look valid */
     geometry->NumHeads        = CUR_HEADS(id_buf);
     geometry->SectorsPerTrack = CUR_SECTORS(id_buf);
     geometry->TotalCylinders  = CUR_CYLS(id_buf);
     Method = "BIOS";
-  } else if (ATA_HEADS(id_buf) > 0 && ATA_CYLS(id_buf) > 0 && ATA_SECTORS(id_buf) > 0) {
+  }
+  else if (ATA_HEADS(id_buf) > 0 && ATA_CYLS(id_buf) > 0 && ATA_SECTORS(id_buf) > 0)
+  {
     /* ATA-supplied values for geometry look valid */
     geometry->NumHeads        = ATA_HEADS(id_buf);
     geometry->SectorsPerTrack = ATA_SECTORS(id_buf);
     geometry->TotalCylinders  = ATA_CYLS(id_buf);
     Method = "ATA";
-  } else {
+  }
+  else
+  {
     /* use typical SCSI geometry */
     geometry->NumHeads        = 255;
     geometry->SectorsPerTrack = 63;
@@ -654,72 +699,76 @@ void ata_get_geometry_pp(IORBH _far *iorb)
     Method = "SCSI";
   }
 
-  dprintf("Physical geometry: %ld cylinders, %d heads, %d sectors per track (%ldMB) (%s)\n",
-      (u32) geometry->TotalCylinders, (u16) geometry->NumHeads, (u16) geometry->SectorsPerTrack,
-      (u32) (geometry->TotalSectors / 2048), Method);
+  DPRINTF(2,"Physical geometry: %d cylinders, %d heads, %d sectors per track (%dMB) (%s)\n",
+      geometry->TotalCylinders, geometry->NumHeads, geometry->SectorsPerTrack,
+      (geometry->TotalSectors / 2048), Method);
 
   /* Fixup the geometry in case the geometry reported by the BIOS is bad */
-  if (adjust_cylinders(geometry, geometry->TotalSectors)) { // cylinder overflow
+  if (adjust_cylinders(geometry, geometry->TotalSectors))
+  { // cylinder overflow
     log_geom_calculate_LBA_assist(geometry, geometry->TotalSectors);
     geometry->TotalSectors = (USHORT)(geometry->NumHeads * geometry->SectorsPerTrack) * (ULONG)geometry->TotalCylinders;
   }
   adjust_cylinders(geometry, geometry->TotalSectors);
 
-  dprintf("Logical geometry: %ld cylinders, %d heads, %d sectors per track (%ldMB) (%s)\n",
-      (u32) geometry->TotalCylinders, (u16) geometry->NumHeads, (u16) geometry->SectorsPerTrack,
-      (u32) (geometry->TotalSectors / 2048), Method);
+  DPRINTF(2,"Logical geometry: %d cylinders, %d heads, %d sectors per track (%dMB) (%s)\n",
+      geometry->TotalCylinders, geometry->NumHeads, geometry->SectorsPerTrack,
+      (geometry->TotalSectors / 2048), Method);
 
-  if (is_lvm_geometry(iorb)) Method = "LVM";
+  if (is_lvm_geometry(pIorb)) Method = "LVM";
   ad_infos[a].ports[p].devs[0].dev_info.Cylinders = geometry->TotalCylinders;
   ad_infos[a].ports[p].devs[0].dev_info.HeadsPerCylinder = geometry->NumHeads;
   ad_infos[a].ports[p].devs[0].dev_info.SectorsPerTrack = geometry->SectorsPerTrack;
   ad_infos[a].ports[p].devs[0].dev_info.TotalSectors = geometry->TotalSectors;
   ad_infos[a].ports[p].devs[0].dev_info.Method = Method;
 
-  dprintf("Reported geometry: %ld cylinders, %d heads, %d sectors per track (%ldMB) (%s)\n",
-      (u32) geometry->TotalCylinders, (u16) geometry->NumHeads, (u16) geometry->SectorsPerTrack,
-      (u32) (geometry->TotalSectors / 2048), Method);
+  DPRINTF(2,"Reported geometry: %d cylinders, %d heads, %d sectors per track (%dMB) (%s)\n",
+      geometry->TotalCylinders, geometry->NumHeads, geometry->SectorsPerTrack,
+      (geometry->TotalSectors / 2048), Method);
 
   /* tell interrupt handler that this IORB is complete */
-  add_workspace(iorb)->complete = 1;
+  add_workspace(pIorb)->complete = 1;
 }
 
 /******************************************************************************
  * Test whether unit is ready.
  */
-int ata_unit_ready(IORBH _far *iorb, int slot)
+int ata_unit_ready(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot)
 {
   /* This is a NOP for ATA devices (at least right now); returning an error
    * without setting an error code means ahci_exec_iorb() will not queue any
    * HW command and the IORB will complete successfully.
    */
-  ((IORB_UNIT_STATUS _far *) iorb)->UnitStatus = US_READY | US_POWER;
+  ((IORB_UNIT_STATUS *)pIorb)->UnitStatus = US_READY | US_POWER;
   return(-1);
 }
 
 /******************************************************************************
  * Read sectors from AHCI device.
  */
-int ata_read(IORBH _far *iorb, int slot)
+int ata_read(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot)
 {
-  IORB_EXECUTEIO _far *io = (IORB_EXECUTEIO _far *) iorb;
-  AD_INFO *ai = ad_infos + iorb_unit_adapter(iorb);
+  IORB_EXECUTEIO *io = (IORB_EXECUTEIO *)pIorb;
+  SCATGATENTRY *pSGList = (SCATGATENTRY*)Far16ToFlat(io->pSGList);
+  AD_INFO *ai = ad_infos + iorb_unit_adapter(pIorb);
   ULONG sector = io->RBA + io->BlocksXferred;
   USHORT count = io->BlockCount - io->BlocksXferred;
   USHORT sg_indx;
   USHORT sg_cnt;
-  int p = iorb_unit_port(iorb);
-  int d = iorb_unit_device(iorb);
+  int p = iorb_unit_port(pIorb);
+  int d = iorb_unit_device(pIorb);
   int rc;
 
-  if (io->BlockCount == 0) {
+  if (io->BlockCount == 0)
+  {
     /* NOP; return -1 without error in IORB to indicate success */
     return(-1);
   }
 
-  if (add_workspace(iorb)->unaligned) {
+  if (add_workspace(pIorb)->unaligned)
+  {
     /* unaligned S/G addresses present; need to use double buffers */
-    return(ata_read_unaligned(iorb, slot));
+    return(ata_read_unaligned(pIorb, slot));
   }
 
   /* Kludge: some I/O commands during boot use excessive S/G buffer lengths
@@ -728,35 +777,43 @@ int ata_read(IORBH _far *iorb, int slot)
    * count, we'll adjust that element.
    */
   if (io->BlocksXferred == 0 && io->cSGList == 1 &&
-      io->pSGList[0].XferBufLen > (ULONG) io->BlockCount * io->BlockSize) {
-    io->pSGList[0].XferBufLen = (ULONG) io->BlockCount * io->BlockSize;
+      pSGList[0].XferBufLen > (ULONG) io->BlockCount * io->BlockSize)
+  {
+    pSGList[0].XferBufLen = (ULONG) io->BlockCount * io->BlockSize;
   }
 
   /* prepare read command while keeping an eye on S/G count limitations */
-  do {
+  do
+  {
     sg_indx = ata_get_sg_indx(io);
     sg_cnt = io->cSGList - sg_indx;
-    if ((rc = ata_cmd_read(iorb, ai, p, d, slot, sector, count,
-                           io->pSGList + sg_indx, sg_cnt)) > 0) {
+    if ((rc = ata_cmd_read(pIorb, ai, p, d, slot, sector, count,
+                           pSGList + sg_indx, sg_cnt)) > 0)
+    {
       /* couldn't map all S/G elements */
-      ata_max_sg_cnt(io, sg_indx, (USHORT) rc, &sg_cnt, &count);
+      ata_max_sg_cnt(io, sg_indx, rc, &sg_cnt, &count);
     }
   } while (rc > 0 && sg_cnt > 0);
 
-  if (rc == 0) {
-    add_workspace(iorb)->blocks = count;
-    add_workspace(iorb)->ppfunc = ata_read_pp;
-
-  } else if (rc > 0) {
-    iorb_seterr(iorb, IOERR_CMD_SGLIST_BAD);
-
-  } else if (rc == ATA_CMD_UNALIGNED_ADDR) {
+  if (rc == 0)
+  {
+    add_workspace(pIorb)->blocks = count;
+    add_workspace(pIorb)->ppfunc = ata_read_pp;
+  }
+  else if (rc > 0)
+  {
+    iorb_seterr(pIorb, IOERR_CMD_SGLIST_BAD);
+  }
+  else if (rc == ATA_CMD_UNALIGNED_ADDR)
+  {
     /* unaligned S/G addresses detected; need to use double buffers */
-    add_workspace(iorb)->unaligned = 1;
-    return(ata_read_unaligned(iorb, slot));
+    add_workspace(pIorb)->unaligned = 1;
+    return(ata_read_unaligned(pIorb, slot));
 
-  } else {
-    iorb_seterr(iorb, IOERR_CMD_ADD_SOFTWARE_FAILURE);
+  }
+  else
+  {
+    iorb_seterr(pIorb, IOERR_CMD_ADD_SOFTWARE_FAILURE);
   }
 
   return(rc);
@@ -768,39 +825,41 @@ int ata_read(IORBH _far *iorb, int slot)
  * restrictions. This doesn't happen very often but when it does, we need to
  * use a transfer buffer and copy the data manually.
  */
-int ata_read_unaligned(IORBH _far *iorb, int slot)
+int ata_read_unaligned(IORBH *pIorb, int slot)
 {
-  IORB_EXECUTEIO _far *io = (IORB_EXECUTEIO _far *) iorb;
-  ADD_WORKSPACE _far *aws = add_workspace(iorb);
-  AD_INFO *ai = ad_infos + iorb_unit_adapter(iorb);
+  IORB_EXECUTEIO *io = (IORB_EXECUTEIO *)pIorb;
+  ADD_WORKSPACE *aws = add_workspace(pIorb);
+  AD_INFO *ai = ad_infos + iorb_unit_adapter(pIorb);
   ULONG sector = io->RBA + io->BlocksXferred;
   SCATGATENTRY sg_single;
-  int p = iorb_unit_port(iorb);
-  int d = iorb_unit_device(iorb);
+  int p = iorb_unit_port(pIorb);
+  int d = iorb_unit_device(pIorb);
   int rc;
 
-  ddprintf("ata_read_unaligned(%d.%d.%d, %ld)\n", ad_no(ai), p, d, sector);
+  DPRINTF(7,"ata_read_unaligned(%d.%d.%d, %d)\n", ad_no(ai), p, d, sector);
+  ai->ports[p].unaligned_read_count++;
 
   /* allocate transfer buffer */
-  if ((aws->buf = malloc(io->BlockSize)) == NULL) {
-    iorb_seterr(iorb, IOERR_CMD_SW_RESOURCE);
+  if ((aws->buf = MemAlloc(io->BlockSize)) == NULL)
+  {
+    iorb_seterr(pIorb, IOERR_CMD_SW_RESOURCE);
     return(-1);
   }
 
   /* prepare read command using transfer buffer */
-  sg_single.ppXferBuf = virt_to_phys(aws->buf);
+  sg_single.ppXferBuf = MemPhysAdr(aws->buf);
   sg_single.XferBufLen = io->BlockSize;
-  rc = ata_cmd_read(iorb, ai, p, d, slot, sector, 1, &sg_single, 1);
+  rc = ata_cmd_read(pIorb, ai, p, d, slot, sector, 1, &sg_single, 1);
 
   if (rc == 0) {
-    add_workspace(iorb)->blocks = 1;
-    add_workspace(iorb)->ppfunc = ata_read_pp;
+    add_workspace(pIorb)->blocks = 1;
+    add_workspace(pIorb)->ppfunc = ata_read_pp;
 
   } else if (rc > 0) {
-    iorb_seterr(iorb, IOERR_CMD_SGLIST_BAD);
+    iorb_seterr(pIorb, IOERR_CMD_SGLIST_BAD);
 
   } else {
-    iorb_seterr(iorb, IOERR_CMD_ADD_SOFTWARE_FAILURE);
+    iorb_seterr(pIorb, IOERR_CMD_ADD_SOFTWARE_FAILURE);
   }
 
   return(rc);
@@ -812,62 +871,69 @@ int ata_read_unaligned(IORBH _far *iorb, int slot)
  * transferred, requeues the IORB to process the remaining sectors. It also
  * takes care of copying data from the transfer buffer for unaligned reads.
  */
-void ata_read_pp(IORBH _far *iorb)
+void ata_read_pp(IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
-  IORB_EXECUTEIO _far *io = (IORB_EXECUTEIO _far *) iorb;
-  ADD_WORKSPACE _far *aws = add_workspace(iorb);
+  IORB_EXECUTEIO *io = (IORB_EXECUTEIO *)pIorb;
+  SCATGATENTRY *pSGList = (SCATGATENTRY*)Far16ToFlat(io->pSGList);
+  ADD_WORKSPACE *aws = add_workspace(pIorb);
 
-  if (aws->unaligned) {
+  if (aws->unaligned)
+  {
     /* copy transfer buffer to corresponding physical address in S/G list */
-    sg_memcpy(io->pSGList, io->cSGList,
+    sg_memcpy(pSGList, io->cSGList,
               (ULONG) io->BlocksXferred * (ULONG) io->BlockSize,
               aws->buf, io->BlockSize, BUF_TO_SG);
   }
 
-  io->BlocksXferred += add_workspace(iorb)->blocks;
-  ddprintf("ata_read_pp(): blocks transferred = %d\n", (int) io->BlocksXferred);
+  io->BlocksXferred += add_workspace(pIorb)->blocks;
+  DPRINTF(7,__func__": blocks transferred = %d\n", io->BlocksXferred);
 
-  if (io->BlocksXferred >= io->BlockCount) {
+  if (io->BlocksXferred >= io->BlockCount)
+  {
     /* we're done; tell IRQ handler the IORB is complete */
-    add_workspace(iorb)->complete = 1;
-  } else {
+    add_workspace(pIorb)->complete = 1;
+  }
+  else
+  {
     /* requeue this IORB for next iteration */
-    iorb_requeue(iorb);
+    iorb_requeue(pIorb);
   }
 }
 
 /******************************************************************************
  * Verify readability of sectors on ATA device.
  */
-int ata_verify(IORBH _far *iorb, int slot)
+int ata_verify(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot)
 {
-  IORB_EXECUTEIO _far *io = (IORB_EXECUTEIO _far *) iorb;
-  AD_INFO *ai = ad_infos + iorb_unit_adapter(iorb);
-  int p = iorb_unit_port(iorb);
-  int d = iorb_unit_device(iorb);
+  IORB_EXECUTEIO *io = (IORB_EXECUTEIO *)pIorb;
+  AD_INFO *ai = ad_infos + iorb_unit_adapter(pIorb);
+  int p = iorb_unit_port(pIorb);
+  int d = iorb_unit_device(pIorb);
   int rc;
 
-  if (io->BlockCount == 0) {
+  if (io->BlockCount == 0)
+  {
     /* NOP; return -1 without error in IORB to indicate success */
     return(-1);
   }
 
   /* prepare verify command */
-  if (io->RBA >= (1UL << 28) || io->BlockCount > 256) {
+  if (io->RBA >= (1UL << 28) || io->BlockCount > 256)
+  {
     /* need LBA48 for this command */
     if (!ai->ports[p].devs[d].lba48) {
-      iorb_seterr(iorb, IOERR_RBA_LIMIT);
+      iorb_seterr(pIorb, IOERR_RBA_LIMIT);
       return(-1);
     }
     rc = ata_cmd(ai, p, d, slot, ATA_CMD_VERIFY_EXT,
-                 AP_SECTOR_48, (u32) io->RBA, (u16) 0,
-                 AP_COUNT,     (u16) io->BlockCount,
+                 AP_SECTOR_48, io->RBA, 0,
+                 AP_COUNT,     io->BlockCount,
                  AP_DEVICE,    0x40,
                  AP_END);
   } else {
     rc = ata_cmd(ai, p, d, slot, ATA_CMD_VERIFY,
-                 AP_SECTOR_28, (u32) io->RBA,
-                 AP_COUNT,     (u16) io->BlockCount & 0xffU,
+                 AP_SECTOR_28, io->RBA,
+                 AP_COUNT,     io->BlockCount & 0xffU,
                  AP_DEVICE,    0x40,
                  AP_END);
   }
@@ -878,54 +944,62 @@ int ata_verify(IORBH _far *iorb, int slot)
 /******************************************************************************
  * Write sectors to AHCI device.
  */
-int ata_write(IORBH _far *iorb, int slot)
+int ata_write(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot)
 {
-  IORB_EXECUTEIO _far *io = (IORB_EXECUTEIO _far *) iorb;
-  AD_INFO *ai = ad_infos + iorb_unit_adapter(iorb);
+  IORB_EXECUTEIO *io = (IORB_EXECUTEIO *)pIorb;
+  SCATGATENTRY *pSGList = (SCATGATENTRY*)Far16ToFlat(io->pSGList);
+  AD_INFO *ai = ad_infos + iorb_unit_adapter(pIorb);
   ULONG sector = io->RBA + io->BlocksXferred;
   USHORT count = io->BlockCount - io->BlocksXferred;
   USHORT sg_indx;
   USHORT sg_cnt;
-  int p = iorb_unit_port(iorb);
-  int d = iorb_unit_device(iorb);
+  int p = iorb_unit_port(pIorb);
+  int d = iorb_unit_device(pIorb);
   int rc;
 
-  if (io->BlockCount == 0) {
+  if (io->BlockCount == 0)
+  {
     /* NOP; return -1 without error in IORB to indicate success */
     return(-1);
   }
 
-  if (add_workspace(iorb)->unaligned) {
+  if (add_workspace(pIorb)->unaligned)
+  {
     /* unaligned S/G addresses present; need to use double buffers */
-    return(ata_write_unaligned(iorb, slot));
+    return(ata_write_unaligned(pIorb, slot));
   }
 
   /* prepare write command while keeping an eye on S/G count limitations */
   do {
     sg_indx = ata_get_sg_indx(io);
     sg_cnt = io->cSGList - sg_indx;
-    if ((rc = ata_cmd_write(iorb, ai, p, d, slot, sector, count,
-                            io->pSGList + sg_indx, sg_cnt,
-                            io->Flags & XIO_DISABLE_HW_WRITE_CACHE)) > 0) {
+    if ((rc = ata_cmd_write(pIorb, ai, p, d, slot, sector, count,
+                            pSGList + sg_indx, sg_cnt,
+                            io->Flags & XIO_DISABLE_HW_WRITE_CACHE)) > 0)
+    {
       /* couldn't map all S/G elements */
       ata_max_sg_cnt(io, sg_indx, (USHORT) rc, &sg_cnt, &count);
     }
   } while (rc > 0 && sg_cnt > 0);
 
-  if (rc == 0) {
-    add_workspace(iorb)->blocks = count;
-    add_workspace(iorb)->ppfunc = ata_write_pp;
-
-  } else if (rc > 0) {
-    iorb_seterr(iorb, IOERR_CMD_SGLIST_BAD);
-
-  } else if (rc == ATA_CMD_UNALIGNED_ADDR) {
+  if (rc == 0)
+  {
+    add_workspace(pIorb)->blocks = count;
+    add_workspace(pIorb)->ppfunc = ata_write_pp;
+  }
+  else if (rc > 0)
+  {
+    iorb_seterr(pIorb, IOERR_CMD_SGLIST_BAD);
+  }
+  else if (rc == ATA_CMD_UNALIGNED_ADDR)
+  {
     /* unaligned S/G addresses detected; need to use double buffers */
-    add_workspace(iorb)->unaligned = 1;
-    return(ata_write_unaligned(iorb, slot));
-
-  } else {
-    iorb_seterr(iorb, IOERR_CMD_ADD_SOFTWARE_FAILURE);
+    add_workspace(pIorb)->unaligned = 1;
+    return(ata_write_unaligned(pIorb, slot));
+  }
+  else
+  {
+    iorb_seterr(pIorb, IOERR_CMD_ADD_SOFTWARE_FAILURE);
   }
 
   return(rc);
@@ -937,45 +1011,50 @@ int ata_write(IORBH _far *iorb, int slot)
  * restrictions. This doesn't happen very often but when it does, we need to
  * use a transfer buffer and copy the data manually.
  */
-int ata_write_unaligned(IORBH _far *iorb, int slot)
+int ata_write_unaligned(IORBH *pIorb, int slot)
 {
-  IORB_EXECUTEIO _far *io = (IORB_EXECUTEIO _far *) iorb;
-  ADD_WORKSPACE _far *aws = add_workspace(iorb);
-  AD_INFO *ai = ad_infos + iorb_unit_adapter(iorb);
+  IORB_EXECUTEIO *io = (IORB_EXECUTEIO *)pIorb;
+  SCATGATENTRY *pSGList = (SCATGATENTRY*)Far16ToFlat(io->pSGList);
+  ADD_WORKSPACE *aws = add_workspace(pIorb);
+  AD_INFO *ai = ad_infos + iorb_unit_adapter(pIorb);
   ULONG sector = io->RBA + io->BlocksXferred;
   SCATGATENTRY sg_single;
-  int p = iorb_unit_port(iorb);
-  int d = iorb_unit_device(iorb);
+  int p = iorb_unit_port(pIorb);
+  int d = iorb_unit_device(pIorb);
   int rc;
 
-  ddprintf("ata_write_unaligned(%d.%d.%d, %ld)\n", ad_no(ai), p, d, sector);
+  DPRINTF(7,"ata_write_unaligned(%d.%d.%d, %d)\n", ad_no(ai), p, d, sector);
 
   /* allocate transfer buffer */
-  if ((aws->buf = malloc(io->BlockSize)) == NULL) {
-    iorb_seterr(iorb, IOERR_CMD_SW_RESOURCE);
+  if ((aws->buf = MemAlloc(io->BlockSize)) == NULL)
+  {
+    iorb_seterr(pIorb, IOERR_CMD_SW_RESOURCE);
     return(-1);
   }
 
   /* copy next sector from S/G list to transfer buffer */
-  sg_memcpy(io->pSGList, io->cSGList,
+  sg_memcpy(pSGList, io->cSGList,
             (ULONG) io->BlocksXferred * (ULONG) io->BlockSize,
             aws->buf, io->BlockSize, SG_TO_BUF);
 
   /* prepare write command using transfer buffer */
-  sg_single.ppXferBuf = virt_to_phys(aws->buf);
+  sg_single.ppXferBuf = MemPhysAdr(aws->buf);
   sg_single.XferBufLen = io->BlockSize;
-  rc = ata_cmd_write(iorb, ai, p, d, slot, sector, 1, &sg_single, 1,
+  rc = ata_cmd_write(pIorb, ai, p, d, slot, sector, 1, &sg_single, 1,
                      io->Flags & XIO_DISABLE_HW_WRITE_CACHE);
 
-  if (rc == 0) {
-    add_workspace(iorb)->blocks = 1;
-    add_workspace(iorb)->ppfunc = ata_write_pp;
-
-  } else if (rc > 0) {
-    iorb_seterr(iorb, IOERR_CMD_SGLIST_BAD);
-
-  } else {
-    iorb_seterr(iorb, IOERR_CMD_ADD_SOFTWARE_FAILURE);
+  if (rc == 0)
+  {
+    add_workspace(pIorb)->blocks = 1;
+    add_workspace(pIorb)->ppfunc = ata_write_pp;
+  }
+  else if (rc > 0)
+  {
+    iorb_seterr(pIorb, IOERR_CMD_SGLIST_BAD);
+  }
+  else
+  {
+    iorb_seterr(pIorb, IOERR_CMD_ADD_SOFTWARE_FAILURE);
   }
 
   return(rc);
@@ -987,46 +1066,52 @@ int ata_write_unaligned(IORBH _far *iorb, int slot)
  * BlocksXferred counter in the IORB and, if not all blocks have been
  * transferred, requeues the IORB to process the remaining sectors.
  */
-void ata_write_pp(IORBH _far *iorb)
+void ata_write_pp(IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
-  IORB_EXECUTEIO _far *io = (IORB_EXECUTEIO _far *) iorb;
+  IORB_EXECUTEIO *io = (IORB_EXECUTEIO *)pIorb;
 
-  io->BlocksXferred += add_workspace(iorb)->blocks;
-  ddprintf("ata_write_pp(): blocks transferred = %d\n", (int) io->BlocksXferred);
+  io->BlocksXferred += add_workspace(pIorb)->blocks;
+  DPRINTF(7,"ata_write_pp(): blocks transferred = %d\n", io->BlocksXferred);
 
-  if (io->BlocksXferred >= io->BlockCount) {
+  if (io->BlocksXferred >= io->BlockCount)
+  {
     /* we're done; tell IRQ handler the IORB is complete */
-    add_workspace(iorb)->complete = 1;
-  } else {
+    add_workspace(pIorb)->complete = 1;
+  }
+  else
+  {
     /* requeue this IORB for next iteration */
-    iorb_requeue(iorb);
+    iorb_requeue(pIorb);
   }
 }
 
 /******************************************************************************
  * Execute ATA command.
  */
-int ata_execute_ata(IORBH _far *iorb, int slot)
+int ata_execute_ata(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot)
 {
-  IORB_ADAPTER_PASSTHRU _far *apt = (IORB_ADAPTER_PASSTHRU _far *) iorb;
-  AD_INFO *ai = ad_infos + iorb_unit_adapter(iorb);
-  int p = iorb_unit_port(iorb);
-  int d = iorb_unit_device(iorb);
+  IORB_ADAPTER_PASSTHRU *apt = (IORB_ADAPTER_PASSTHRU *)pIorb;
+  SCATGATENTRY *pSGList = (SCATGATENTRY*)Far16ToFlat(apt->pSGList);
+  AD_INFO *ai = ad_infos + iorb_unit_adapter(pIorb);
+  int p = iorb_unit_port(pIorb);
+  int d = iorb_unit_device(pIorb);
   int rc;
 
-  if (apt->ControllerCmdLen != sizeof(ATA_CMD)) {
-    iorb_seterr(iorb, IOERR_CMD_SYNTAX);
+  if (apt->ControllerCmdLen != sizeof(ATA_CMD))
+  {
+    iorb_seterr(pIorb, IOERR_CMD_SYNTAX);
     return(-1);
   }
 
   rc = ata_cmd(ai, p, d, slot, 0,
-               AP_SGLIST,   apt->pSGList, apt->cSGList,
-               AP_ATA_CMD,  apt->pControllerCmd,
+               AP_SGLIST,   pSGList, apt->cSGList,
+               AP_ATA_CMD,  Far16ToFlat(apt->pControllerCmd),
                AP_WRITE,    !(apt->Flags & PT_DIRECTION_IN),
                AP_END);
 
-  if (rc == 0) {
-    add_workspace(iorb)->ppfunc = ata_execute_ata_pp;
+  if (rc == 0)
+  {
+    add_workspace(pIorb)->ppfunc = ata_execute_ata_pp;
   }
 
   return(rc);
@@ -1039,29 +1124,30 @@ int ata_execute_ata(IORBH _far *iorb, int slot)
  *
  * See ata_cmd_to_fis() for an explanation of the mapping.
  */
-void ata_execute_ata_pp(IORBH _far *iorb)
+void ata_execute_ata_pp(IORBH FAR16DATA *vIorb, IORBH *pIorb)
 {
-  AHCI_PORT_DMA _far *dma_base;
-  ATA_CMD _far *cmd;
+  AHCI_PORT_DMA *dma_base;
+  ATA_CMD *cmd;
   AD_INFO *ai;
-  u8 _far *fis;
+  u8 *fis;
   int p;
 
   /* get address of D2H FIS */
-  ai = ad_infos + iorb_unit_adapter(iorb);
-  p = iorb_unit_port(iorb);
+  ai = ad_infos + iorb_unit_adapter(pIorb);
+  p = iorb_unit_port(pIorb);
   dma_base = port_dma_base(ai, p);
   fis = dma_base->rx_fis + 0x40;
 
-  if (fis[0] != 0x34) {
+  if (fis[0] != 0x34)
+  {
     /* this is not a D2H FIS - give up silently */
-    ddprintf("ata_execute_ata_pp(): D2H FIS type incorrect: %d\n", fis[0]);
-    add_workspace(iorb)->complete = 1;
+    DPRINTF(3,"ata_execute_ata_pp(): D2H FIS type incorrect: %d\n", fis[0]);
+    add_workspace(pIorb)->complete = 1;
     return;
   }
 
   /* map D2H FIS to the original ATA controller command structure */
-  cmd = (ATA_CMD _far *) ((IORB_ADAPTER_PASSTHRU _far *) iorb)->pControllerCmd;
+  cmd = (ATA_CMD *)Far16ToFlat(((IORB_ADAPTER_PASSTHRU*)pIorb)->pControllerCmd);
 
   cmd->cmd      = fis[2];
   cmd->device   = fis[7];
@@ -1076,10 +1162,10 @@ void ata_execute_ata_pp(IORBH _far *iorb)
   cmd->count    = ((u16) fis[12])
                 | ((u16) fis[13] << 8);
 
-  dphex(cmd, sizeof(*cmd), "ahci_execute_ata_pp(): cmd after completion:\n");
+  DHEXDUMP(5,cmd, sizeof(*cmd), "ahci_execute_ata_pp(): cmd after completion:\n");
 
   /* signal completion to interrupt handler */
-  add_workspace(iorb)->complete = 1;
+  add_workspace(pIorb)->complete = 1;
 }
 
 /******************************************************************************
@@ -1098,33 +1184,46 @@ void ata_execute_ata_pp(IORBH _far *iorb)
  *     interesting error codes (such as medium errors) and report everything
  *     else with a generic error code.
  */
-int ata_req_sense(IORBH _far *iorb, int slot)
+int ata_req_sense(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot)
 {
-  AD_INFO *ai = ad_infos + iorb_unit_adapter(iorb);
-  u8 _far *port_mmio = port_base(ai, iorb_unit_port(iorb));
+  AD_INFO *ai = ad_infos + iorb_unit_adapter(pIorb);
+  u8 *port_mmio = port_base(ai, iorb_unit_port(pIorb));
   u32 tf_data = readl(port_mmio + PORT_TFDATA);
-  u8 err = (u8) (tf_data >> 8);
-  u8 sts = (u8) (tf_data);
+  u8 err = (tf_data >> 8);
+  u8 sts = (tf_data);
 
-  if (sts & ATA_ERR) {
-    if (sts & ATA_DF) {
+  if (sts & ATA_ERR)
+  {
+    if (sts & ATA_DF)
+    {
       /* there is a device-specific error condition */
-      if (err & ATA_ICRC) {
-        iorb_seterr(iorb, IOERR_ADAPTER_DEVICEBUSCHECK);
-      } else if (err & ATA_UNC) {
-        iorb_seterr(iorb, IOERR_MEDIA);
-      } else if (err & ATA_IDNF) {
-        iorb_seterr(iorb, IOERR_RBA_ADDRESSING_ERROR);
-      } else {
-        iorb_seterr(iorb, IOERR_DEVICE_NONSPECIFIC);
+      if (err & ATA_ICRC)
+      {
+        iorb_seterr(pIorb, IOERR_ADAPTER_DEVICEBUSCHECK);
+      }
+      else if (err & ATA_UNC)
+      {
+        iorb_seterr(pIorb, IOERR_MEDIA);
+      }
+      else if (err & ATA_IDNF)
+      {
+        iorb_seterr(pIorb, IOERR_RBA_ADDRESSING_ERROR);
+      }
+      else
+      {
+        iorb_seterr(pIorb, IOERR_DEVICE_NONSPECIFIC);
       }
 
-    } else {
-      iorb_seterr(iorb, IOERR_DEVICE_NONSPECIFIC);
     }
-  } else {
+    else
+    {
+      iorb_seterr(pIorb, IOERR_DEVICE_NONSPECIFIC);
+    }
+  }
+  else
+  {
     /* this function only gets called when we received an error interrupt */
-    iorb_seterr(iorb, IOERR_DEVICE_NONSPECIFIC);
+    iorb_seterr(pIorb, IOERR_DEVICE_NONSPECIFIC);
   }
 
   /* Return an error to indicate there's no HW command to be submitted and
@@ -1161,41 +1260,48 @@ char *ata_dev_name(u16 *id_buf)
  * Fabricate ATA READ command based on the capabilities of the corresponding
  * device and the paramters set from above (NCQ, etc).
  */
-static int ata_cmd_read(IORBH _far *iorb, AD_INFO *ai, int p, int d, int slot,
-                        ULONG sector, ULONG count, SCATGATENTRY _far *sg_list,
+static int ata_cmd_read(IORBH *pIorb, AD_INFO *ai, int p, int d, int slot,
+                        ULONG sector, ULONG count, SCATGATENTRY *sg_list,
                         ULONG sg_cnt)
 {
   int rc;
 
-  if (sector >= (1UL << 28) || count > 256 || add_workspace(iorb)->is_ncq) {
+  if (sector >= (1UL << 28) || count > 256 || add_workspace(pIorb)->is_ncq)
+  {
     /* need LBA48 for this command */
-    if (!ai->ports[p].devs[d].lba48) {
-      iorb_seterr(iorb, IOERR_RBA_LIMIT);
+    if (!ai->ports[p].devs[d].lba48)
+    {
+      iorb_seterr(pIorb, IOERR_RBA_LIMIT);
       return(-1);
     }
-    if (add_workspace(iorb)->is_ncq) {
+    if (add_workspace(pIorb)->is_ncq)
+    {
       /* use NCQ read; count goes into feature register, tag into count! */
       rc = ata_cmd(ai, p, d, slot, ATA_CMD_FPDMA_READ,
-                   AP_SECTOR_48, (u32) sector, (u16) 0,
-                   AP_FEATURES,  (u16) count,
-                   AP_COUNT,     (u16) (slot << 3), /* tag == slot */
-                   AP_SGLIST,    sg_list, (u16) sg_cnt,
+                   AP_SECTOR_48, sector, 0,
+                   AP_FEATURES,  count,
+                   AP_COUNT,     (slot << 3), /* tag == slot */
+                   AP_SGLIST,    sg_list, sg_cnt,
                    AP_DEVICE,    0x40,
                    AP_END);
-    } else {
+    }
+    else
+    {
       rc = ata_cmd(ai, p, d, slot, ATA_CMD_READ_EXT,
-                   AP_SECTOR_48, (u32) sector, (u16) 0,
-                   AP_COUNT,     (u16) count,
-                   AP_SGLIST,    sg_list, (u16) sg_cnt,
+                   AP_SECTOR_48, sector, 0,
+                   AP_COUNT,     count,
+                   AP_SGLIST,    sg_list, sg_cnt,
                    AP_DEVICE,    0x40,
                    AP_END);
     }
 
-  } else {
+  }
+  else
+  {
     rc = ata_cmd(ai, p, d, slot, ATA_CMD_READ,
-                 AP_SECTOR_28, (u32) sector,
-                 AP_COUNT,     (u16) count & 0xffU,
-                 AP_SGLIST,    sg_list, (u16) sg_cnt,
+                 AP_SECTOR_28, sector,
+                 AP_COUNT,     count & 0xffU,
+                 AP_SGLIST,    sg_list, sg_cnt,
                  AP_DEVICE,    0x40,
                  AP_END);
   }
@@ -1207,46 +1313,52 @@ static int ata_cmd_read(IORBH _far *iorb, AD_INFO *ai, int p, int d, int slot,
  * Fabricate ATA WRITE command based on the capabilities of the corresponding
  * device and the paramters set from above (NCQ, etc)
  */
-static int ata_cmd_write(IORBH _far *iorb, AD_INFO *ai, int p, int d, int slot,
-                         ULONG sector, ULONG count, SCATGATENTRY _far *sg_list,
+static int ata_cmd_write(IORBH *pIorb, AD_INFO *ai, int p, int d, int slot,
+                         ULONG sector, ULONG count, SCATGATENTRY *sg_list,
                          ULONG sg_cnt, int write_through)
 {
   int rc;
 
-  if (sector >= (1UL << 28) || count > 256 || add_workspace(iorb)->is_ncq) {
+  if (sector >= (1UL << 28) || count > 256 || add_workspace(pIorb)->is_ncq)
+  {
     /* need LBA48 for this command */
-    if (!ai->ports[p].devs[d].lba48) {
-      iorb_seterr(iorb, IOERR_RBA_LIMIT);
+    if (!ai->ports[p].devs[d].lba48)
+    {
+      iorb_seterr(pIorb, IOERR_RBA_LIMIT);
       return(-1);
     }
-    if (add_workspace(iorb)->is_ncq) {
+    if (add_workspace(pIorb)->is_ncq)
+    {
       /* use NCQ write; count goes into feature register, tag into count! */
       rc = ata_cmd(ai, p, d, slot, ATA_CMD_FPDMA_WRITE,
-                   AP_SECTOR_48, (u32) sector, (u16) 0,
-                   AP_FEATURES,  (u16) count,
+                   AP_SECTOR_48, sector, 0,
+                   AP_FEATURES,  count,
                    /* tag = slot */
-                   AP_COUNT,     (u16) (slot << 3),
-                   AP_SGLIST,    sg_list, (u16) sg_cnt,
+                   AP_COUNT,     (slot << 3),
+                   AP_SGLIST,    sg_list, sg_cnt,
                    AP_DEVICE,    0x40,
                    /* force unit access */
                    AP_DEVICE,    (write_through && !force_write_cache) ? 0x80 : 0,
                    AP_WRITE,     1,
                    AP_END);
-    } else {
+    }
+    else
+    {
       rc = ata_cmd(ai, p, d, slot, ATA_CMD_WRITE_EXT,
-                   AP_SECTOR_48, (u32) sector, (u16) 0,
-                   AP_COUNT,     (u16) count,
-                   AP_SGLIST,    sg_list, (u16) sg_cnt,
+                   AP_SECTOR_48, sector, 0,
+                   AP_COUNT,     count,
+                   AP_SGLIST,    sg_list, sg_cnt,
                    AP_DEVICE,    0x40,
                    AP_WRITE,     1,
                    AP_END);
     }
-
-  } else {
+  }
+  else
+  {
     rc = ata_cmd(ai, p, d, slot, ATA_CMD_WRITE,
-                 AP_SECTOR_28, (u32) sector,
-                 AP_COUNT,     (u16) count & 0xffU,
-                 AP_SGLIST,    sg_list, (u16) sg_cnt,
+                 AP_SECTOR_28, sector,
+                 AP_COUNT,     count & 0xffU,
+                 AP_SGLIST,    sg_list, sg_cnt,
                  AP_DEVICE,    0x40,
                  AP_WRITE,     1,
                  AP_END);
@@ -1254,3 +1366,58 @@ static int ata_cmd_write(IORBH _far *iorb, AD_INFO *ai, int p, int d, int slot,
 
   return(rc);
 }
+
+/******************************************************************************
+ * Copy block from S/G list to virtual address or vice versa.
+ */
+void sg_memcpy(SCATGATENTRY *sg_list, USHORT sg_cnt, ULONG sg_off,
+               void *buf, USHORT len, SG_MEMCPY_DIRECTION dir)
+{
+  USHORT i;
+  USHORT l;
+  ULONG phys_addr;
+  ULONG pos = 0;
+  char *p;
+
+  /* walk through S/G list to find the elements involved in the operation */
+  for (i = 0; i < sg_cnt && len > 0; i++)
+  {
+    if (pos <= sg_off && pos + sg_list[i].XferBufLen > sg_off)
+    {
+      /* this S/G element intersects with the block to be copied */
+      phys_addr = sg_list[i].ppXferBuf + (sg_off - pos);
+      if ((l = sg_list[i].XferBufLen - (sg_off - pos)) > len)
+      {
+        l = len;
+      }
+
+      if (Dev32Help_PhysToLin(phys_addr, l, (PVOID) &p))
+      {
+        panic(__func__": DevHelp_PhysToLin() failed");
+      }
+      if (dir == SG_TO_BUF)
+      {
+        memcpy(buf, p, l);
+      }
+      else
+      {
+        memcpy(p, buf, l);
+      }
+      sg_off += l;
+      buf = (char *) buf + l;
+      len -= l;
+    }
+
+    pos += sg_list[i].XferBufLen;
+  }
+}
+
+/******************************************************************************
+ * Halt processing by submitting an internal error. This is a last resort and
+ * should only be called when the system state is corrupt.
+ */
+void panic(char *msg)
+{
+  Dev32Help_InternalError(msg, strlen(msg));
+}
+

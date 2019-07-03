@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2011 thi.guten Software Development
  * Copyright (c) 2011 Mensys B.V.
- * Copyright (c) 2013 David Azarewicz
+ * Copyright (c) 2013-2018 David Azarewicz
  *
  * Authors: Christian Mueller, Markus Thielen
  *
@@ -32,154 +32,40 @@
 /* offset of PCI base address register (BAR) in the PCI config space */
 #define PCI_BAR(reg)   (UCHAR) (0x10 + (reg) * sizeof(u32))
 
-/******************************************************************************
- * OEMHLP constants for PCI access
- */
-#define GENERIC_IOCTL       0x10
-#define OH_CATEGORY         0x00
-#define OH_FUNC_PCI         0x0b
-
-/* subfunctions */
-#define OH_BIOS_INFO        0x00
-#define OH_FIND_DEVICE      0x01
-#define OH_FIND_CLASS       0x02
-#define OH_READ_CONFIG      0x03
-#define OH_WRITE_CONFIG     0x04
-
-/* return codes */
-#define OH_SUCCESS          0x00
-#define OH_NOT_SUPPORTED    0x81
-#define OH_BAD_VENDOR       0x83
-#define OH_NOT_FOUND        0x86
-#define OH_BAD_REGISTER     0x87
-
 /* ------------------------ typedefs and structures ------------------------ */
-
-/******************************************************************************
- * OEMHLP IOCtl parameter union. The parameter area is generally used as input
- * to the OEMHLP IOCtl calls.
- */
-typedef union {
-
-  /* query PCI BIOS information" */
-  struct {
-    UCHAR    subfunction;
-  } bios_info;
-
-  /* find PCI device */
-  struct {
-    UCHAR    subfunction;
-    USHORT   device;
-    USHORT   vendor;
-    UCHAR    index;
-  } find_device;
-
-  /* find PCI class code */
-  struct {
-    UCHAR    subfunction;
-    ULONG    class;
-    UCHAR    index;
-  } find_class;
-
-  /* read PCI configuration space */
-  struct {
-    UCHAR    subfunction;
-    UCHAR    bus;
-    UCHAR    dev_func;
-    UCHAR    reg;
-    UCHAR    size;
-  } read_config;
-
-  /* write PCI configuration space */
-  struct {
-    UCHAR    subfunction;
-    UCHAR    bus;
-    UCHAR    dev_func;
-    UCHAR    reg;
-    UCHAR    size;
-    ULONG    data;
-  } write_config;
-
-} OH_PARM;
-
-/******************************************************************************
- * OEMHLP IOCtl data union. The data area is generally used as output from the
- * OEMHLP IOCtl calls.
- */
-typedef union {
-
-  /* query PCI BIOS information" */
-  struct {
-    UCHAR    rc;
-    UCHAR    hw_mech;
-    UCHAR    major_version;
-    UCHAR    minor_version;
-    UCHAR    last_bus;
-  } bios_info;
-
-  /* find PCI device */
-  struct {
-    UCHAR    rc;
-    UCHAR    bus;
-    UCHAR    dev_func;
-  } find_device;
-
-  /* find PCI class code */
-  struct {
-    UCHAR    rc;
-    UCHAR    bus;
-    UCHAR    dev_func;
-  } find_class;
-
-  /* read PCI confguration space */
-  struct {
-    UCHAR    rc;
-    ULONG    data;
-  } read_config;
-
-  /* write PCI confguration space */
-  struct {
-    UCHAR    rc;
-  } write_config;
-
-} OH_DATA;
 
 /* -------------------------- function prototypes -------------------------- */
 
-static void  add_pci_device   (PCI_ID *pci_id, OH_DATA _far *data);
-static int   oemhlp_call      (UCHAR subfunction, OH_PARM _far *parm,
-                               OH_DATA _far *data);
-static long  bar_resource     (UCHAR bus, UCHAR dev_func,
-                               RESOURCESTRUCT _far *resource, int i);
-static char *rmerr            (APIRET ret);
+static void  add_pci_device(PCI_ID *pci_id, USHORT BusDevFunc);
+static long  bar_resource(USHORT BusDevFunc, RESOURCESTRUCT *resource, int i);
+static char *rmerr(APIRET ret);
 
 /* ------------------------ global/static variables ------------------------ */
 
 /******************************************************************************
  * chipset/controller name strings
  */
-static char chip_esb2[]       = "ESB2";
-static char chip_ich8[]       = "ICH8";
-static char chip_ich8m[]      = "ICH8M";
-static char chip_ich9[]       = "ICH9";
-static char chip_ich9m[]      = "ICH9M";
-static char chip_ich10[]      = "ICH10";
-static char chip_pchahci[]    = "PCH AHCI";
-static char chip_pchraid[]    = "PCH RAID";
-static char chip_tolapai[]    = "Tolapai";
-static char chip_sb600[]      = "SB600";
-static char chip_sb700[]      = "SB700/800";
-static char chip_vt8251[]     = "VT8251";
-static char chip_mcp65[]      = "MCP65";
-static char chip_mcp67[]      = "MCP67";
-static char chip_mcp73[]      = "MCP73";
-static char chip_mcp77[]      = "MCP77";
-static char chip_mcp79[]      = "MCP79";
-static char chip_mcp89[]      = "MCP689";
-static char chip_sis968[]     = "968";
+static char chip_esb2[]    = "ESB2";
+static char chip_ich8[]    = "ICH8";
+static char chip_ich8m[]   = "ICH8M";
+static char chip_ich9[]    = "ICH9";
+static char chip_ich9m[]   = "ICH9M";
+static char chip_ich10[]   = "ICH10";
+static char chip_pchahci[] = "PCH AHCI";
+static char chip_pchraid[] = "PCH RAID";
+static char chip_tolapai[] = "Tolapai";
+static char chip_sb600[]   = "SB600";
+static char chip_sb700[]   = "SB700/800";
+static char chip_vt8251[]  = "VT8251";
+static char chip_mcp65[]   = "MCP65";
+static char chip_mcp67[]   = "MCP67";
+static char chip_mcp73[]   = "MCP73";
+static char chip_mcp77[]   = "MCP77";
+static char chip_mcp79[]   = "MCP79";
+static char chip_mcp89[]   = "MCP689";
+static char chip_sis968[]  = "968";
 
-static char s_generic[]       = "Generic";
-
+static char s_generic[]    = "Generic";
 
 
 /******************************************************************************
@@ -187,8 +73,8 @@ static char s_generic[]       = "Generic";
  * AHCI driver.
  */
 
-PCI_ID pci_ids[] = {
-
+PCI_ID pci_ids[] =
+{
   /* Intel
    * NOTE: ICH5 controller does NOT support AHCI, so we do
    *       not add it here! */
@@ -358,15 +244,6 @@ PCI_ID pci_ids[] = {
   { 0, 0, 0, 0, 0, 0, 0, NULL }
 };
 
-/******************************************************************************
- * OEMHLP$ is used by OS/2 to provide access to OEM-specific machine resources
- * like PCI BIOS access. We're using this to enumerate the PCI bus. Due to
- * BIOS bugs, it may be necessary to use I/O operations for this purpose but
- * so far I think this is only relevant for rather old PCs and SATA is not
- * expected to be a priority on those machines.
- */
-static IDCTABLE     oemhlp;            /* OEMHLP$ IDC entry point */
-
 /* ----------------------------- start of code ----------------------------- */
 
 /******************************************************************************
@@ -381,10 +258,7 @@ int add_pci_id(u16 vendor, u16 device)
 
   /* search for last used slot in 'pci_ids' */
   for (i = max_slot; i >= 0 && pci_ids[i].vendor == 0; i--);
-  if (i >= max_slot) {
-    /* all slots in use */
-    return(-1);
-  }
+  if (i >= max_slot) return(-1); /* all slots in use */
 
   /* use slot after the last used slot */
   i++;
@@ -400,22 +274,13 @@ int add_pci_id(u16 vendor, u16 device)
  */
 void scan_pci_bus(void)
 {
-  OH_PARM parm;
-  OH_DATA data;
   UCHAR index;
-  UCHAR rc;
   int ad_indx = 0;
   int i;
   int n;
+  USHORT BusDevFunc;
 
-  ddprintf("scanning PCI bus...\n");
-
-  /* verify that we have a PCI system */
-  memset(&parm, 0x00, sizeof(parm));
-  if (oemhlp_call(OH_BIOS_INFO, &parm, &data) != OH_SUCCESS) {
-    cprintf("%s: couldn't get PCI BIOS information\n", drv_name);
-    return;
-  }
+  DPRINTF(3,"scanning PCI bus...\n");
 
   /* Go through the list of PCI IDs and search for each device
    *
@@ -433,49 +298,48 @@ void scan_pci_bus(void)
    *    specified. The assumption is that most, if not all, modern AHCI
    *    adapters have the correct class code (PCI_CLASS_STORAGE_SATA_AHCI).
    */
-  for (i = 0; pci_ids[i].vendor != 0; i++) {
+  for (i = 0; pci_ids[i].vendor != 0; i++)
+  {
     index = 0;
-    do {
-      if (pci_ids[i].device == PCI_ANY_ID || pci_ids[i].vendor == PCI_ANY_ID) {
+    do
+    {
+      if (pci_ids[i].device == PCI_ANY_ID || pci_ids[i].vendor == PCI_ANY_ID)
+      {
         /* look for class code */
-        memset(&parm, 0x00, sizeof(parm));
-        parm.find_class.class = pci_ids[i].class;
-        parm.find_class.index = index;
-        rc = oemhlp_call(OH_FIND_CLASS, &parm, &data);
-
-      } else if (thorough_scan) {
+        BusDevFunc = PciFindClass(pci_ids[i].class, index);
+      }
+      else if (thorough_scan)
+      {
         /* look for this specific vendor and device ID */
-        memset(&parm, 0x00, sizeof(parm));
-        parm.find_device.device = pci_ids[i].device;
-        parm.find_device.vendor = pci_ids[i].vendor;
-        parm.find_device.index = index;
-        rc = oemhlp_call(OH_FIND_DEVICE, &parm, &data);
+        BusDevFunc = PciFindDevice( pci_ids[i].vendor, pci_ids[i].device, index);
 
-      } else {
-        rc = OH_NOT_FOUND;
+      }
+      else
+      {
+        BusDevFunc = 0xffff;
       }
 
-      if (rc == OH_SUCCESS) {
+      if (BusDevFunc != 0xffff)
+      {
         /* found a device */
         int already_found = 0;
 
         /* increment index for next loop */
-        if (++index > 180) {
-          /* something's wrong here... */
-          return;
-        }
+        if (++index > 180) return; /* something's wrong here... */
 
         /* check whether we already found this device */
-        for (n = 0; n < ad_info_cnt; n++) {
-          if (ad_infos[n].bus == data.find_device.bus &&
-              ad_infos[n].dev_func == data.find_device.dev_func) {
+        for (n = 0; n < ad_info_cnt; n++)
+        {
+          if (ad_infos[n].bus_dev_func == BusDevFunc)
+          {
             /* this device has already been found (e.g. via thorough scan) */
             already_found = 1;
             break;
           }
         }
 
-        if (already_found || (ad_ignore & (1U << ad_indx++))) {
+        if (already_found || (ad_ignore & (1U << ad_indx++)))
+        {
           /* ignore this device; it has either already been found via a
            * thorough scan or has been specified to be ignored via command
            * line option */
@@ -483,10 +347,10 @@ void scan_pci_bus(void)
         }
 
         /* add this PCI device to ad_infos[] */
-        add_pci_device(pci_ids + i, &data);
+        add_pci_device(pci_ids + i, BusDevFunc);
       }
 
-    } while (rc == OH_SUCCESS);
+    } while (BusDevFunc != 0xffff);
   }
 }
 
@@ -495,12 +359,13 @@ void scan_pci_bus(void)
  * interrupt generation for a device. This function clears the corresponding
  * bit in the configuration space command register.
  */
-int pci_enable_int(UCHAR bus, UCHAR dev_func)
+int pci_enable_int(USHORT BusDevFunc)
 {
   ULONG tmp;
 
-  if (pci_read_conf (bus, dev_func, 4, sizeof(u32), &tmp) != OH_SUCCESS ||
-      pci_write_conf(bus, dev_func, 4, sizeof(u32), tmp & ~(1UL << 10)) != OH_SUCCESS) {
+  if (PciReadConfig(BusDevFunc, 4, sizeof(tmp), &tmp) ||
+      PciWriteConfig(BusDevFunc, 4, sizeof(tmp), tmp & ~(1UL << 10)))
+  {
     return(-1);
   }
   return(0);
@@ -513,32 +378,30 @@ int pci_enable_int(UCHAR bus, UCHAR dev_func)
  */
 void pci_hack_virtualbox(void)
 {
-  ULONG irq = 0;
+  UCHAR irq = 0;
 
-  if (pci_read_conf(0, 0x08, 0x60, 1, &irq) == OH_SUCCESS && irq == 0x80) {
+  if (!PciReadConfig(0x0008, 0x60, sizeof(irq), &irq) && irq == 0x80)
+  {
     /* set IRQ for first device/func to 11 */
-    dprintf("hacking virtualbox PIIX3 PCI to ISA bridge IRQ mapping\n");
+    DPRINTF(1,"hacking virtualbox PIIX3 PCI to ISA bridge IRQ mapping\n");
     irq = ad_infos[0].irq;
-    pci_write_conf(0, 0x08, 0x60, 1, irq);
+    PciWriteConfig(0x0008, 0x60, sizeof(irq), irq);
   }
 }
 
 /******************************************************************************
  * Add a single PCI device to the list of adapters.
  */
-static void add_pci_device(PCI_ID *pci_id, OH_DATA _far *data)
+static void add_pci_device(PCI_ID *pci_id, USHORT BusDevFunc)
 {
   char rc_list_buf[sizeof(AHRESOURCE) + sizeof(HRESOURCE) * 15];
-  AHRESOURCE _far *rc_list = (AHRESOURCE _far *) rc_list_buf;
+  AHRESOURCE *rc_list = (AHRESOURCE *) rc_list_buf;
   RESOURCESTRUCT resource;
   ADAPTERSTRUCT adapter;
   ADJUNCT adj;
   AD_INFO *ad_info;
   APIRET ret;
-  UCHAR bus       = data->find_class.bus;
-  UCHAR dev_func  = data->find_class.dev_func;
   ULONG val;
-  SEL gdt[PORT_DMA_BUF_SEGS + 1];
   char tmp[40];
   u16 device;
   u16 vendor;
@@ -550,19 +413,16 @@ static void add_pci_device(PCI_ID *pci_id, OH_DATA _far *data)
   /*****************************************************************************
    * Part 1: Get further information about the device to be added; PCI ID...
    */
-  if (pci_read_conf(bus, dev_func, 0x00, sizeof(ULONG), &val) != OH_SUCCESS) {
-    return;
-  }
-  device = (u16) (val >> 16);
-  vendor = (u16) (val & 0xffff);
+  if (PciReadConfig(BusDevFunc, 0x00, sizeof(ULONG), &val)) return;
+  device = (val >> 16);
+  vendor = (val & 0xffff);
 
   /* ... and class code */
-  if (pci_read_conf(bus, dev_func, 0x08, sizeof(ULONG), &val) != OH_SUCCESS) {
-    return;
-  }
-  class = (u32) (val >> 8);
+  if (PciReadConfig(BusDevFunc, 0x08, sizeof(ULONG), &val)) return;
+  class = (val >> 8);
 
-  if (pci_id->device == PCI_ANY_ID) {
+  if (pci_id->device == PCI_ANY_ID)
+  {
     /* We found this device in a wildcard search. There are two possible
      * reasons which require a different handling:
      *
@@ -586,22 +446,23 @@ static void add_pci_device(PCI_ID *pci_id, OH_DATA _far *data)
      *     the OS2AHCI driver avoids this kind of scan in favor of a class-
      *     based scan (unless overridden with the "/T" option).
      */
-    if (pci_id->vendor != PCI_ANY_ID) {
+    if (pci_id->vendor != PCI_ANY_ID)
+    {
       /* case 1: the vendor is known but we found the PCI device using a class
        * search; verify vendor matches the one in pci_ids[]
        */
-      if (pci_id->vendor != vendor) {
-        /* vendor doesn't match */
-        return;
-      }
-
-    } else {
+      if (pci_id->vendor != vendor) return; /* vendor doesn't match */
+    }
+    else
+    {
       /* case 2: we found this device using a generic class search; if the
        * device/vendor is listed in pci_ids[], use this entry in favor of the
        * one passed in 'pci_id'
        */
-      for (i = 0; pci_ids[i].vendor != 0; i++) {
-        if (pci_ids[i].device == device && pci_ids[i].vendor == vendor) {
+      for (i = 0; pci_ids[i].vendor != 0; i++)
+      {
+        if (pci_ids[i].device == device && pci_ids[i].vendor == vendor)
+        {
           pci_id = pci_ids + i;
           break;
         }
@@ -610,13 +471,30 @@ static void add_pci_device(PCI_ID *pci_id, OH_DATA _far *data)
   }
 
   /* found a supported AHCI device */
-  ciiprintf("Found AHCI device %s %s (%d:%d:%d %04x:%04x) class:0x%06lx\n",
-            vendor_from_id(vendor), device_from_id(device),
-            bus, dev_func>>3, dev_func&7, vendor, device, class);
+
+  if (PciReadConfig(BusDevFunc, 0x3c, sizeof(u32), &val)) return;
+  irq = (int) (val & 0xff);
+  pin = (int) ((val >> 8) & 0xff);
+
+  #if 0
+  i = 1;
+  if (irq==0 || irq==255) i = 0;
+
+  if (verbosity > i)
+  {
+    iprintf("%s AHCI device %s %s (%d:%d:%d %04x:%04x) class:0x%06x", i?"Found":"Ignoring",
+     vendor_from_id(vendor), device_from_id(device),
+     PCI_BUS_FROM_BDF(BusDevFunc), PCI_DEV_FROM_BDF(BusDevFunc), PCI_FUNC_FROM_BDF(BusDevFunc),
+     vendor, device, class);
+    if (i==0) iprintf("Invalid interrupt (IRQ=%d).", irq);
+  }
+  if (i==0) return;
+  #endif
 
   /* make sure we got room in the adapter information array */
-  if (ad_info_cnt >= MAX_AD - 1) {
-    cprintf("%s: too many AHCI devices\n", drv_name);
+  if (ad_info_cnt >= MAX_AD - 1)
+  {
+    iprintf("%s: too many AHCI devices", drv_name);
     return;
   }
 
@@ -636,55 +514,37 @@ static void add_pci_device(PCI_ID *pci_id, OH_DATA _far *data)
   memset(ad_info, 0x00, sizeof(*ad_info));
   rc_list->NumResource = 0;
 
-  /* Register IRQ with resource manager
-   *
-   * NOTE: We rely on the IRQ number saved in the PCI config space by the PCI
-   *       BIOS. There's no reliable way to find out the IRQ number in any
-   *       other way unless we start using message-driven interrupts (which
-   *       is out of scope for the time being).
-   */
-  if (pci_read_conf(bus, dev_func, 0x3c, sizeof(u32), &val) != OH_SUCCESS) {
-    return;
-  }
-  irq = (int) (val & 0xff);
-  pin = (int) ((val >> 8) & 0xff);
-
-  memset(&resource, 0x00, sizeof(resource));
-  resource.ResourceType          = RS_TYPE_IRQ;
-  resource.IRQResource.IRQLevel  = irq;
-  resource.IRQResource.PCIIrqPin = pin;
-  resource.IRQResource.IRQFlags  = RS_IRQ_SHARED;
-
-  ret = RMAllocResource(rm_drvh, &ad_info->rm_irq, &resource);
-  if (ret != RMRC_SUCCESS) {
-    cprintf("%s: couldn't register IRQ %d (rc = %s)\n", drv_name, irq, rmerr(ret));
-    return;
-  }
-  rc_list->hResource[rc_list->NumResource++] = ad_info->rm_irq;
-
   /* Allocate all I/O and MMIO addresses offered by this device. In theory,
    * we need only BAR #5, the AHCI MMIO BAR, but in order to prevent any
    * other driver from hijacking our device and accessing it via legacy
    * registers we'll reserve anything we can find.
    */
 
-  ddprintf("Adapter %d PCI=%d:%d:%d ID=%04x:%04x\n", ad_info_cnt, bus, dev_func>>3, dev_func&7, vendor, device);
+  ciprintf("Adapter %d PCI=%d:%d:%d ID=%04x:%04x\n", ad_info_cnt, PCI_BUS_FROM_BDF(BusDevFunc),
+    PCI_DEV_FROM_BDF(BusDevFunc), PCI_FUNC_FROM_BDF(BusDevFunc), vendor, device);
+  DPRINTF(1,"Adapter %d PCI=%d:%d:%d ID=%04x:%04x\n", ad_info_cnt, PCI_BUS_FROM_BDF(BusDevFunc),
+    PCI_DEV_FROM_BDF(BusDevFunc), PCI_FUNC_FROM_BDF(BusDevFunc), vendor, device);
 
-  for (i = 0; i < sizeof(ad_info->rm_bars) / sizeof(*ad_info->rm_bars); i++) {
-    long len = bar_resource(bus, dev_func, &resource, i);
+  for (i = 0; i < sizeof(ad_info->rm_bars) / sizeof(*ad_info->rm_bars); i++)
+  {
+    long len = bar_resource(BusDevFunc, &resource, i);
 
-    if (len < 0) {
+    if (len < 0)
+    {
       /* something went wrong */
       goto add_pci_fail;
     }
-    if (len == 0) {
+    if (len == 0)
+    {
       /* this BAR is unused */
       continue;
     }
 
-    if (i == AHCI_PCI_BAR) {
-      if (resource.ResourceType != RS_TYPE_MEM) {
-        cprintf("%s: BAR #5 must be an MMIO region\n", drv_name);
+    if (i == AHCI_PCI_BAR)
+    {
+      if (resource.ResourceType != RS_TYPE_MEM)
+      {
+        iprintf("%s: BAR #5 must be an MMIO region", drv_name);
         goto add_pci_fail;
       }
       /* save this BAR's address as MMIO address */
@@ -694,16 +554,24 @@ static void add_pci_device(PCI_ID *pci_id, OH_DATA _far *data)
 
     /* register [MM]IO region with resource manager */
     ret = RMAllocResource(rm_drvh, ad_info->rm_bars + i, &resource);
-    if (ret != RMRC_SUCCESS) {
-      cprintf("%s: couldn't register [MM]IO region (rc = %s)\n",
-              drv_name, rmerr(ret));
+    if (ret != RMRC_SUCCESS)
+    {
+      if (ret == RMRC_RES_ALREADY_CLAIMED)
+      {
+        ciiprintf("Device already claimed.");
+      }
+      else
+      {
+        iprintf("%s: couldn't register [MM]IO region (rc = %s)", drv_name, rmerr(ret));
+      }
       goto add_pci_fail;
     }
     rc_list->hResource[rc_list->NumResource++] = ad_info->rm_bars[i];
   }
 
-  if (ad_info->mmio_phys == 0) {
-    cprintf("%s: couldn't determine MMIO base address\n", drv_name);
+  if (ad_info->mmio_phys == 0)
+  {
+    iprintf("%s: couldn't determine MMIO base address", drv_name);
     goto add_pci_fail;
   }
 
@@ -715,58 +583,22 @@ static void add_pci_device(PCI_ID *pci_id, OH_DATA _far *data)
   ad_info->pci = pci_id;
   ad_info->pci_vendor = vendor;
   ad_info->pci_device = device;
-  ad_info->bus = bus;
-  ad_info->dev_func = dev_func;
+  ad_info->bus_dev_func = BusDevFunc;
   ad_info->irq = irq;
+  ad_info->irq_pin = pin;
 
-  /* allocate memory for port-specific DMA scratch buffers */
-  if (DevHelp_AllocPhys((long) AHCI_PORT_PRIV_DMA_SZ * AHCI_MAX_PORTS,
-                        MEMTYPE_ABOVE_1M, &ad_info->dma_buf_phys) != 0) {
-    cprintf("%s: couldn't allocate DMA scratch buffers for AHCI ports\n", drv_name);
-    ad_info->dma_buf_phys = 0;
-    goto add_pci_fail;
-  }
-
-  /* allocate GDT selectors for memory-mapped I/O and DMA scratch buffers */
-  if (DevHelp_AllocGDTSelector(gdt, PORT_DMA_BUF_SEGS + 1) != 0) {
-    cprintf("%s: couldn't allocate GDT selectors\n", drv_name);
-    memset(gdt, 0x00, sizeof(gdt));
-    goto add_pci_fail;
-  }
-
-  /* map MMIO address to first GDT selector */
-  if (DevHelp_PhysToGDTSelector(ad_info->mmio_phys,
-                                (USHORT) ad_info->mmio_size, gdt[0]) != 0) {
-    cprintf("%s: couldn't map MMIO address to GDT selector\n", drv_name);
-    goto add_pci_fail;
-  }
-
-  /* map DMA scratch buffers to remaining GDT selectors */
-  for (i = 0; i < PORT_DMA_BUF_SEGS; i++) {
-    ULONG addr = ad_info->dma_buf_phys + i * PORT_DMA_SEG_SIZE;
-    USHORT len = AHCI_PORT_PRIV_DMA_SZ * PORT_DMA_BUFS_PER_SEG;
-
-    if (DevHelp_PhysToGDTSelector(addr, len, gdt[i+1]) != 0) {
-      cprintf("%s: couldn't map DMA scratch buffer to GDT selector\n", drv_name);
-      goto add_pci_fail;
-    }
-  }
-
-  /* fill in MMIO and DMA scratch buffer addresses in adapter info */
-  ad_info->mmio = (u8 _far *) ((u32) gdt[0] << 16);
-  for (i = 0; i < PORT_DMA_BUF_SEGS; i++) {
-    ad_info->dma_buf[i] = (u8 _far *) ((u32) gdt[i+1] << 16);
-  }
+  ad_info->mmio = MapPhysToLin(ad_info->mmio_phys, ad_info->mmio_size);
+  if (!ad_info->mmio) goto add_pci_fail;
 
   /* register adapter with resource manager */
   memset(&adj, 0x00, sizeof(adj));
-  adj.pNextAdj             = NULL;
-  adj.AdjLength            = sizeof(adj);
-  adj.AdjType              = ADJ_ADAPTER_NUMBER;
-  adj.Adapter_Number       = ad_info_cnt;
+  adj.pNextAdj       = NULL;
+  adj.AdjLength      = sizeof(adj);
+  adj.AdjType        = ADJ_ADAPTER_NUMBER;
+  adj.Adapter_Number = ad_info_cnt;
 
   memset(&adapter, 0x00, sizeof(adapter));
-  sprintf(tmp, "AHCI_%d Controller", ad_info_cnt);
+  snprintf(tmp, sizeof(tmp), "AHCI_%d Controller", ad_info_cnt);
   adapter.AdaptDescriptName = tmp;
   adapter.AdaptFlags        = 0;
   adapter.BaseType          = AS_BASE_MSD;
@@ -777,166 +609,39 @@ static void add_pci_device(PCI_ID *pci_id, OH_DATA _far *data)
   adapter.pAdjunctList      = &adj;
 
   ret = RMCreateAdapter(rm_drvh, &ad_info->rm_adh, &adapter, NULL, rc_list);
-  if (ret != RMRC_SUCCESS) {
-    cprintf("%s: couldn't register adapter (rc = %s)\n", drv_name, rmerr(ret));
+  if (ret != RMRC_SUCCESS)
+  {
+    iprintf("%s: couldn't register adapter (rc = %s)", drv_name, rmerr(ret));
     goto add_pci_fail;
   }
+
+  if (ahci_config_caps(ad_info)) goto add_pci_fail;
+
+  #ifndef DAZ_NEW_CODE
+  /* fill in DMA scratch buffer addresses in adapter info */
+  for (i = 0; i < AHCI_MAX_PORTS; i++)
+  {
+    if (!(ad_info->port_map & (1UL << i))) continue;
+
+    ad_info->ports[i].dma_buf = MemAllocAlign(AHCI_PORT_PRIV_DMA_SZ, 1024);
+    ad_info->ports[i].dma_buf_phys = MemPhysAdr(ad_info->ports[i].dma_buf);
+  }
+  #endif
 
   /* Successfully added the adapter and reserved its resources; the adapter
    * is still under BIOS control so we're not going to do anything else at
    * this point.
    */
+
   ad_info_cnt++;
   return;
 
 add_pci_fail:
   /* something went wrong; try to clean up as far as possible */
-  for (i = 0; i < sizeof(ad_info->rm_bars) / sizeof(*ad_info->rm_bars); i++) {
-    if (ad_info->rm_bars[i] != 0) {
-      RMDeallocResource(rm_drvh, ad_info->rm_bars[i]);
-    }
+  for (i = 0; i < sizeof(ad_info->rm_bars) / sizeof(*ad_info->rm_bars); i++)
+  {
+    if (ad_info->rm_bars[i] != 0) RMDeallocResource(rm_drvh, ad_info->rm_bars[i]);
   }
-  if (ad_info->rm_irq != 0) {
-    RMDeallocResource(rm_drvh, ad_info->rm_irq);
-  }
-  for (i = 0; i < sizeof(gdt) / sizeof(*gdt); i++) {
-    if (gdt[i] != 0) {
-      DevHelp_FreeGDTSelector(gdt[i]);
-    }
-  }
-  if (ad_info->dma_buf_phys != 0) {
-    DevHelp_FreePhys(ad_info->dma_buf_phys);
-  }
-}
-
-/******************************************************************************
- * Read PCI configuration space register
- */
-UCHAR pci_read_conf(UCHAR bus, UCHAR dev_func, UCHAR indx, UCHAR size,
-                           ULONG _far *val)
-{
-  OH_PARM parm;
-  OH_DATA data;
-  UCHAR rc;
-
-  memset(&parm, 0x00, sizeof(parm));
-  parm.read_config.bus      = bus;
-  parm.read_config.dev_func = dev_func;
-  parm.read_config.reg      = indx;
-  parm.read_config.size     = size;
-  if ((rc = oemhlp_call(OH_READ_CONFIG, &parm, &data) != OH_SUCCESS)) {
-    cprintf("%s: couldn't read config space (bus = %d, dev_func = 0x%02x, indx = 0x%02x, rc = %d)\n",
-            drv_name, bus, dev_func, indx,  rc);
-    return(rc);
-  }
-
-  *val = data.read_config.data;
-  return(OH_SUCCESS);
-}
-
-/******************************************************************************
- * Write PCI configuration space register
- */
-UCHAR pci_write_conf(UCHAR bus, UCHAR dev_func, UCHAR indx, UCHAR size,
-                            ULONG val)
-{
-  OH_PARM parm;
-  OH_DATA data;
-  UCHAR rc;
-
-  memset(&parm, 0x00, sizeof(parm));
-  parm.write_config.bus      = bus;
-  parm.write_config.dev_func = dev_func;
-  parm.write_config.reg      = indx;
-  parm.write_config.size     = size;
-  parm.write_config.data     = val;
-
-  if ((rc = oemhlp_call(OH_WRITE_CONFIG, &parm, &data) != OH_SUCCESS)) {
-    cprintf("%s: couldn't write config space (bus = %d, dev_func = 0x%02x, indx = 0x%02x, rc = %d)\n",
-            drv_name, bus, dev_func, indx, rc);
-    return(rc);
-  }
-
-  return(OH_SUCCESS);
-}
-/******************************************************************************
- * Call OEMHLP$ IDC entry point with the specified IOCtl parameter and data
- * packets.
- */
-static int oemhlp_call(UCHAR subfunction, OH_PARM _far *parm,
-                       OH_DATA _far *data)
-{
-  void (_far *func)(void);
-  RP_GENIOCTL ioctl;
-  unsigned short prot_idc_ds;
-
-  if (oemhlp.ProtIDCEntry == NULL || oemhlp.ProtIDC_DS == 0) {
-    /* attach to OEMHLP$ device driver */
-    if (DevHelp_AttachDD("OEMHLP$ ", (NPBYTE) &oemhlp) ||
-        oemhlp.ProtIDCEntry == NULL ||
-        oemhlp.ProtIDC_DS == 0) {
-      cprintf("%s: couldn't attach to OEMHLP$\n", drv_name);
-      return(OH_NOT_SUPPORTED);
-    }
-  }
-
-  /* store subfuntion in first byte of pararameter packet */
-  parm->bios_info.subfunction = subfunction;
-  memset(data, 0x00, sizeof(*data));
-
-  /* assemble IOCtl request */
-  memset(&ioctl, 0x00, sizeof(ioctl));
-  ioctl.rph.Len     = sizeof(ioctl);
-  ioctl.rph.Unit    = 0;
-  ioctl.rph.Cmd     = GENERIC_IOCTL;
-  ioctl.rph.Status  = 0;
-
-  ioctl.Category    = OH_CATEGORY;
-  ioctl.Function    = OH_FUNC_PCI;
-  ioctl.ParmPacket  = (PUCHAR) parm;
-  ioctl.DataPacket  = (PUCHAR) data;
-  ioctl.ParmLen     = sizeof(*parm);
-  ioctl.DataLen     = sizeof(*data);
-
-  /* Call OEMHLP's IDC routine. Before doing so, we need to assign the address
-   * to be called to a stack variable because the inter-device driver calling
-   * convention forces us to set DS to the device driver's data segment and ES
-   * to the segment of the request packet.
-   */
-  func = oemhlp.ProtIDCEntry;
-
-  /* The WATCOM compiler does not support struct references in inline
-   * assembler code, so we pass it in a stack variable
-   */
-  prot_idc_ds = oemhlp.ProtIDC_DS;
-
-  _asm {
-    push ds;
-    push es;
-    push bx;
-    push si;
-    push di;
-
-    push ss
-    pop  es
-    lea  bx, ioctl;
-    mov  ds, prot_idc_ds;
-    call dword ptr [func];
-
-    pop  di;
-    pop  si;
-    pop  bx;
-    pop  es;
-    pop  ds;
-  }
-
-  //dddphex(parm, sizeof(*parm), "oemhlp_parm: ");
-  //dddphex(data, sizeof(*data), "oemhlp_data: ");
-
-  if (ioctl.rph.Status & STERR) {
-    return(OH_NOT_SUPPORTED);
-  }
-  return(data->bios_info.rc);
 }
 
 /******************************************************************************
@@ -959,33 +664,32 @@ static int oemhlp_call(UCHAR subfunction, OH_PARM _far *parm,
  *  T = type (0 = any 32 bit, 1 = <1M, 2 = 64 bit)
  *  I = I/O (1) or memory (0)
  */
-static long bar_resource(UCHAR bus, UCHAR dev_func,
-                         RESOURCESTRUCT _far *resource, int i)
+static long bar_resource(USHORT BusDevFunc, RESOURCESTRUCT *resource, int i)
 {
   u32 bar_addr = 0;
   u32 bar_size = 0;
 
   /* temporarily write 1s to this BAR to determine the address range */
-  if (pci_read_conf (bus, dev_func, PCI_BAR(i), sizeof(u32), &bar_addr) != OH_SUCCESS ||
-      pci_write_conf(bus, dev_func, PCI_BAR(i), sizeof(u32), ~(0UL))    != OH_SUCCESS ||
-      pci_read_conf (bus, dev_func, PCI_BAR(i), sizeof(u32), &bar_size) != OH_SUCCESS ||
-      pci_write_conf(bus, dev_func, PCI_BAR(i), sizeof(u32), bar_addr)  != OH_SUCCESS) {
-
-    cprintf("%s: couldn't determine [MM]IO size\n", drv_name);
-    if (bar_addr != 0) {
-      pci_write_conf(bus, dev_func, PCI_BAR(i), sizeof(u32), bar_addr);
+  if (PciReadConfig (BusDevFunc, PCI_BAR(i), sizeof(u32), &bar_addr) ||
+      PciWriteConfig(BusDevFunc, PCI_BAR(i), sizeof(u32), ~(0UL))    ||
+      PciReadConfig (BusDevFunc, PCI_BAR(i), sizeof(u32), &bar_size) ||
+      PciWriteConfig(BusDevFunc, PCI_BAR(i), sizeof(u32), bar_addr) )
+  {
+    iprintf("%s: couldn't determine [MM]IO size", drv_name);
+    if (bar_addr != 0)
+    {
+      PciWriteConfig(BusDevFunc, PCI_BAR(i), sizeof(u32), bar_addr);
     }
     return(-1);
   }
 
-  if (bar_size == 0 || bar_size == 0xffffffffUL) {
-    /* bar not implemented or device not working properly */
-    return(0);
-  }
+  /* bar not implemented or device not working properly */
+  if (bar_size == 0 || bar_size == 0xffffffffUL) return(0);
 
   /* prepare resource allocation structure */
   memset(resource, 0x00, sizeof(*resource));
-  if (bar_addr & 1) {
+  if (bar_addr & 1)
+  {
     bar_size = ~(bar_size & 0xfffffffcUL) + 1;
     bar_size &= 0xffffUL;  /* I/O address space is 16 bits on x86 */
     bar_addr &= 0xfffcUL;
@@ -996,7 +700,9 @@ static long bar_resource(UCHAR bus, UCHAR dev_func,
     resource->IOResource.IOFlags        = RS_IO_EXCLUSIVE;
     resource->IOResource.IOAddressLines = 16;
 
-  } else {
+  }
+  else
+  {
     bar_size = ~(bar_size & 0xfffffff0UL) + 1;
     bar_addr &= 0xfffffff0UL;
 
@@ -1006,7 +712,7 @@ static long bar_resource(UCHAR bus, UCHAR dev_func,
     resource->MEMResource.MemFlags = RS_MEM_EXCLUSIVE;
   }
 
-  ddprintf("BAR #%d: type = %s, addr = 0x%08lx, size = %ld\n", i,
+  DPRINTF(3,"BAR #%d: type = %s, addr = 0x%08lx, size = %d\n", i,
            (resource->ResourceType == RS_TYPE_IO) ? "I/O" : "MEM",
            bar_addr, bar_size);
 
@@ -1019,8 +725,8 @@ static long bar_resource(UCHAR bus, UCHAR dev_func,
 char *vendor_from_id(u16 id)
 {
 
-  switch(id) {
-
+  switch(id)
+  {
     case PCI_VENDOR_ID_AL:
       return "Ali";
     case PCI_VENDOR_ID_AMD:
@@ -1055,7 +761,6 @@ char *vendor_from_id(u16 id)
     }
 
   return "Generic";
-
 }
 
 /******************************************************************************
@@ -1066,12 +771,12 @@ char *device_from_id(u16 device)
 {
   int i;
 
-  for (i = 0; pci_ids[i].vendor != 0; i++) {
-
-    if (pci_ids[i].device == device) {
+  for (i = 0; pci_ids[i].vendor != 0; i++)
+  {
+    if (pci_ids[i].device == device)
+    {
       return pci_ids[i].chipname;
     }
-
   }
 
   return s_generic;

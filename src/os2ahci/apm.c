@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2011 thi.guten Software Development
  * Copyright (c) 2011 Mensys B.V.
- * Portions copyright (c) 2013 David Azarewicz
+ * Portions copyright (c) 2013-2018 David Azarewicz
  *
  * Authors: Christian Mueller, Markus Thielen
  *
@@ -33,7 +33,7 @@
 #ifdef LEGACY_APM
 
 #include <apmcalls.h>
-USHORT _far _cdecl apm_event    (APMEVENT _far *evt);
+USHORT _cdecl apm_event    (APMEVENT *evt);
 
 /******************************************************************************
  * Connect to APM driver and register for power state change events.
@@ -44,7 +44,7 @@ void apm_init(void)
 
   /* connect to APM driver */
   if ((rc = APMAttach()) != 0) {
-    dprintf("couldn't connect to APM driver (rc = %d)\n", rc);
+    DPRINTF(2,"couldn't connect to APM driver (rc = %d)\n", rc);
     return;
   }
 
@@ -52,7 +52,7 @@ void apm_init(void)
   if ((rc = APMRegister(apm_event, APM_NOTIFYSETPWR |
                                    APM_NOTIFYNORMRESUME |
                                    APM_NOTIFYCRITRESUME, 0)) != 0) {
-    dprintf("couldn't register for power event notificatins (rc = %d)\n", rc);
+    DPRINTF(2,"couldn't register for power event notificatins (rc = %d)\n", rc);
     return;
   }
 }
@@ -60,11 +60,11 @@ void apm_init(void)
 /******************************************************************************
  * APM event handler
  */
-USHORT _far _cdecl apm_event(APMEVENT _far *evt)
+USHORT _cdecl apm_event(APMEVENT *evt)
 {
   USHORT msg = (USHORT) evt->ulParm1;
 
-  dprintf("received APM event: 0x%lx/0x%lx\n");
+  DPRINTF(2,"received APM event: 0x%x/0x%x\n");
 
   switch (msg) {
 
@@ -82,7 +82,7 @@ USHORT _far _cdecl apm_event(APMEVENT _far *evt)
     break;
 
   default:
-    dprintf("unknown APM event; ignoring...\n");
+    DPRINTF(2,"unknown APM event; ignoring...\n");
     break;
   }
 
@@ -102,7 +102,7 @@ void suspend(void)
   TIMER Timer;
 
   if (suspended) return;
-  dprintf("suspend()\n");
+  DPRINTF(2,"suspend()\n");
 
   /* restart all ports with interrupts disabled */
   for (a = 0; a < ad_info_cnt; a++) {
@@ -111,9 +111,9 @@ void suspend(void)
     lock_adapter(ai);
     for (p = 0; p <= ai->port_max; p++) {
       /* wait until all active commands have completed on this port */
-      timer_init(&Timer, 250);
+      TimerInit(&Timer, 250);
       while (ahci_port_busy(ai, p)) {
-        if (timer_check_and_block(&Timer)) break;
+        if (TimerCheckAndBlock(&Timer)) break;
       }
 
       /* restart port with interrupts disabled */
@@ -121,8 +121,10 @@ void suspend(void)
       ahci_start_port(ai, p, 0);
 
       /* flush cache on all attached devices */
-      for (d = 0; d <= ai->ports[p].dev_max; d++) {
-        if (ai->ports[p].devs[d].present) {
+      for (d = 0; d <= ai->ports[p].dev_max; d++)
+      {
+        if (ai->ports[p].devs[d].present && !ai->ports[p].devs[d].ignored)
+        {
           ahci_flush_cache(ai, p, d);
         }
       }
@@ -141,7 +143,7 @@ void suspend(void)
   init_complete = 0;
 
   suspended = 1;
-  dprintf("suspend() finished\n");
+  DPRINTF(2,"suspend() finished\n");
 }
 
 /******************************************************************************
@@ -153,7 +155,7 @@ void resume(void)
   int a;
 
   if (!suspended) return;
-  dprintf("resume()\n");
+  DPRINTF(2,"resume()\n");
 
   for (a = 0; a < ad_info_cnt; a++) {
     AD_INFO *ai = ad_infos + a;
@@ -187,9 +189,9 @@ void resume(void)
    * of the ACPI software which will make this hack unnecessary.
    */
   resume_sleep_flag = 5000;
-  DevHelp_ArmCtxHook(0, engine_ctxhook_h);
+  KernArmHook(engine_ctxhook_h, 0, 0);
 
-  dprintf("resume() finished\n");
+  DPRINTF(2,"resume() finished\n");
 }
 
 /******************************************************************************
@@ -206,9 +208,10 @@ void shutdown_driver(void)
   u32 tmp;
   //int d;
 
-  dprintf("shutdown_driver() enter\n");
+  DPRINTF(1,"shutdown_driver() enter\n");
 
-  for (a = 0; a < ad_info_cnt; a++) {
+  for (a = 0; a < ad_info_cnt; a++)
+  {
     AD_INFO *ai = ad_infos + a;
 
     /* Try to be nice. Wait 50ms for adapter to go not busy.
@@ -216,8 +219,9 @@ void shutdown_driver(void)
      */
     for (i=0; i<50000 && ai->busy; i++) udelay(1000);
 
-    for (p = 0; p <= ai->port_max; p++) {
-      u8 _far *port_mmio = port_base(ai, p);
+    for (p = 0; p <= ai->port_max; p++)
+    {
+      u8 *port_mmio = port_base(ai, p);
 
       /* Wait up to 50ms for port to go not busy. Again stop it
        * anyway if it doesn't go not busy in that time.
@@ -245,8 +249,10 @@ void shutdown_driver(void)
       ahci_start_port(ai, p, 0);
 
       /* flush cache on all attached devices */
-      for (d = 0; d <= ai->ports[p].dev_max; d++) {
-        if (ai->ports[p].devs[d].present) {
+      for (d = 0; d <= ai->ports[p].dev_max; d++)
+      {
+        if (ai->ports[p].devs[d].present && !ai->ports[p].devs[d].ignored)
+        {
           ahci_flush_cache(ai, p, d);
         }
       }
@@ -257,10 +263,11 @@ void shutdown_driver(void)
   init_complete = 0;
 
   /* restore BIOS configuration for each adapter */
-  for (a = 0; a < ad_info_cnt; a++) {
+  for (a = 0; a < ad_info_cnt; a++)
+  {
     ahci_restore_bios_config(ad_infos + a);
   }
 
-  dprintf("shutdown_driver() finished\n");
+  DPRINTF(1,"shutdown_driver() finished\n");
 }
 

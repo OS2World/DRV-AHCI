@@ -3,6 +3,7 @@
  *
  * Copyright (c) 2011 thi.guten Software Development
  * Copyright (c) 2011 Mensys B.V.
+ * Copyright (c) 2013-2018 David Azarewicz
  *
  * Authors: Christian Mueller, Markus Thielen
  *
@@ -136,7 +137,7 @@ typedef struct {
   } cmd;
 
   ULONG   buflen;         /* length of buffer for data transfers */
-  LIN     buf;            /* buffer for data transfers (32-bit linear address) */
+  void *buf;              /* buffer for data transfers (32-bit linear address) */
   USHORT  sense_len;      /* length of sense data in IOCTL DataPacket */
 } OS2AHCI_PASSTHROUGH;
 

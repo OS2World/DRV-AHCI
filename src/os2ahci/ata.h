@@ -3,6 +3,7 @@
  *
  * Copyright (c) 2011 thi.guten Software Development
  * Copyright (c) 2011 Mensys B.V.
+ * Copyright (c) 2013-2018 David Azarewicz
  *
  * Authors: Christian Mueller, Markus Thielen
  *
@@ -430,12 +431,12 @@ typedef enum {
   AP_SECTOR_28,    /* [u32]               28-bit sector address              */
   AP_SECTOR_48,    /* [u32, u16]          48-bit sector address              */
   AP_DEVICE,       /* [u16]               ATA cmd "device" field             */
-  AP_SGLIST,       /* [void _far *, u16]  buffer S/G (SCATGATENTRY/count)    */
-  AP_VADDR,        /* [void _far *, u16]  buffer virtual address (buf/len)   */
+  AP_SGLIST,       /* [void *, u16]  buffer S/G (SCATGATENTRY/count)    */
+  AP_VADDR,        /* [void *, u16]  buffer virtual address (buf/len)   */
   AP_WRITE,        /* [u16]               if != 0, data is written to device */
   AP_AHCI_FLAGS,   /* [u16]               AHCI command header flags          */
-  AP_ATAPI_CMD,    /* [void _far *, u16]  ATAPI command (CDB) and length     */
-  AP_ATA_CMD,      /* [void _far *]       ATA command (fixed len)            */
+  AP_ATAPI_CMD,    /* [void *, u16]  ATAPI command (CDB) and length     */
+  AP_ATA_CMD,      /* [void *]       ATA command (fixed len)            */
   AP_END           /* []                  end of variable argument list      */
 } ATA_PARM;
 
@@ -489,31 +490,25 @@ typedef struct {
 
 /* -------------------------- function prototypes -------------------------- */
 
-extern int       ata_cmd                  (AD_INFO *ai, int port, int device,
-                                           int slot, int cmd, ...);
-extern int       v_ata_cmd                (AD_INFO *ai, int port, int device,
-                                           int slot, int cmd, va_list va);
-extern void      ata_cmd_to_fis           (u8 _far *fis, ATA_CMD _far *cmd,
-                                           int device);
-extern USHORT    ata_get_sg_indx          (IORB_EXECUTEIO _far *io);
-extern void      ata_max_sg_cnt           (IORB_EXECUTEIO _far *io,
-                                           USHORT sg_indx, USHORT sg_max,
-                                           USHORT _far *sg_cnt,
-                                           USHORT _far *sector_cnt);
+extern int ata_cmd(AD_INFO *ai, int port, int device, int slot, int cmd, ...);
+extern int v_ata_cmd(AD_INFO *ai, int port, int device, int slot, int cmd, va_list va);
+extern void ata_cmd_to_fis(u8 *fis, ATA_CMD *cmd, int device);
+extern USHORT ata_get_sg_indx(IORB_EXECUTEIO *io);
+extern void ata_max_sg_cnt(IORB_EXECUTEIO *io, USHORT sg_indx, USHORT sg_max, USHORT *sg_cnt, USHORT *sector_cnt);
 
-extern int       ata_get_geometry         (IORBH _far *iorb, int slot);
-extern void      ata_get_geometry_pp      (IORBH _far *iorb);
-extern int       ata_unit_ready           (IORBH _far *iorb, int slot);
-extern int       ata_read                 (IORBH _far *iorb, int slot);
-extern int       ata_read_unaligned       (IORBH _far *iorb, int slot);
-extern void      ata_read_pp              (IORBH _far *iorb);
-extern int       ata_verify               (IORBH _far *iorb, int slot);
-extern int       ata_write                (IORBH _far *iorb, int slot);
-extern int       ata_write_unaligned      (IORBH _far *iorb, int slot);
-extern void      ata_write_pp             (IORBH _far *iorb);
-extern int       ata_execute_ata          (IORBH _far *iorb, int slot);
-extern void      ata_execute_ata_pp       (IORBH _far *iorb);
-extern int       ata_req_sense            (IORBH _far *iorb, int slot);
+extern int ata_get_geometry(IORBH FAR16DATA *iorb, IORBH *pIorb, int slot);
+extern void ata_get_geometry_pp(IORBH FAR16DATA *vIorb, IORBH *pIorb);
+extern int ata_unit_ready(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot);
+extern int ata_read(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot);
+extern int ata_read_unaligned(IORBH *pIorb, int slot);
+extern void ata_read_pp(IORBH FAR16DATA *vIorb, IORBH *pIorb);
+extern int ata_verify(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot);
+extern int ata_write(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot);
+extern int ata_write_unaligned(IORBH *pIorb, int slot);
+extern void ata_write_pp(IORBH FAR16DATA *vIorb, IORBH *pIorb);
+extern int ata_execute_ata(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot);
+extern void ata_execute_ata_pp(IORBH FAR16DATA *vIorb, IORBH *pIorb);
+extern int ata_req_sense(IORBH FAR16DATA *vIorb, IORBH *pIorb, int slot);
 
-extern char     *ata_dev_name             (u16 *id_buf);
+extern char *ata_dev_name(u16 *id_buf);
 

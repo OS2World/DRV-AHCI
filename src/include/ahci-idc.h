@@ -3,6 +3,7 @@
  *
  * Copyright (c) 2011 thi.guten Software Development
  * Copyright (c) 2011 Mensys B.V.
+ * Copyright (c) 2013-2016 David Azarewicz
  *
  * Authors: Christian Mueller, Markus Thielen
  *
@@ -44,8 +45,7 @@
 /* ------------------------ typedefs and structures ------------------------ */
 
 /* AHCI_IDC_ENTRY defines a function pointer to the OS2AHCI IDC entry point */
-typedef void (_cdecl _far *PFN_AHCI_IDC_ENTRY) (unsigned short real_ds, 
-                                                RP_GENIOCTL _far *ioctl);
+typedef void (_cdecl *PFN_AHCI_IDC_ENTRY) (unsigned short real_ds, REQPACKET *ioctl);
 
 #pragma pack(1)
 
@@ -53,13 +53,14 @@ typedef void (_cdecl _far *PFN_AHCI_IDC_ENTRY) (unsigned short real_ds,
  * AHCI_ATTACH_AREA defines the device driver attach table as required
  * to attach to os2ahci.add using DevHelp_AttachDD
  */
-typedef struct {
+typedef struct
+{
   PFN_AHCI_IDC_ENTRY  real_entry_point;   /* real mode entry point address */
   unsigned short      real_ds;            /* real mode DS */
 
   PFN_AHCI_IDC_ENTRY  prot_entry_point;   /* protected mode entry point address */
   unsigned short      prot_ds;            /* protected mode DS */
-  } AHCI_ATTACH_AREA;
+} AHCI_ATTACH_AREA;
 
 #pragma pack()
 

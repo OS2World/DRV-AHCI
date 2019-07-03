@@ -3,6 +3,7 @@
  *
  * Copyright (c) 2011 thi.guten Software Development
  * Copyright (c) 2011 Mensys B.V.
+ * Copyright (c) 2013-2018 David Azarewicz
  *
  * Authors: Christian Mueller, Markus Thielen
  *
@@ -86,94 +87,116 @@ ULONG           engine_ctxhook_h;
  * non-NCQ commands active at the same time in order to reduce complexity
  * in the interrupt and error handlers.
  */
-void restart_ctxhook(ULONG parm)
+void _Syscall restart_ctxhook(ULONG parm)
 {
   IORB_QUEUE done_queue;
   AD_INFO *ai;
-  IORBH _far *problem_iorb;
-  IORBH _far *iorb;
-  IORBH _far *next = NULL;
-  u8 _far *port_mmio;
-  int rearm_ctx_hook = 0;
+  IORBH FAR16DATA *vProblemIorb;
+  IORBH FAR16DATA *vIorb;
+  IORBH FAR16DATA *vNext;
+  u8 *port_mmio;
+  int rearm_ctx_hook;
   int need_reset;
   int ccs;
   int a;
   int p;
 
-  dprintf("restart_ctxhook() started\n");
+  D32ThunkStackTo32();
+
+  vNext = FAR16NULL;
+  rearm_ctx_hook = 0;
+
+  DPRINTF(8,"restart_ctxhook() started\n");
   memset(&done_queue, 0x00, sizeof(done_queue));
 
   spin_lock(drv_lock);
 
-  for (a = 0; a < ad_info_cnt; a++) {
+  for (a = 0; a < ad_info_cnt; a++)
+  {
     ai = ad_infos + a;
 
-    if (ai->busy) {
+    if (ai->busy)
+    {
       /* this adapter is busy; leave it alone for now */
       rearm_ctx_hook = 1;
       continue;
     }
 
-    for (p = 0; p <= ai->port_max; p++) {
-      if (ports_to_restart[a] & (1UL << p)) {
+    for (p = 0; p <= ai->port_max; p++)
+    {
+      if (ports_to_restart[a] & (1UL << p))
+      {
         ports_to_restart[a] &= ~(1UL << p);
 
         /* restart this port */
         port_mmio = port_base(ai, p);
-        problem_iorb = NULL;
+        vProblemIorb = FAR16NULL;
         need_reset = 0;
 
-        dprintf("port %d, TF_DATA: 0x%lx\n", p, readl(port_mmio + PORT_TFDATA));
+        DPRINTF(8,"port %d, TF_DATA: 0x%x\n", p, readl(port_mmio + PORT_TFDATA));
 
         /* get "current command slot"; only valid if there are no NCQ cmds */
         ccs = (int) ((readl(port_mmio + PORT_CMD) >> 8) & 0x1f);
-        ddprintf(" PORT_CMD      = 0x%x\n", ccs);
+        DPRINTF(8," PORT_CMD      = 0x%x\n", ccs);
 
-        for (iorb = ai->ports[p].iorb_queue.root; iorb != NULL; iorb = next) {
-          ADD_WORKSPACE _far *aws = add_workspace(iorb);
-          next = iorb->pNxtIORB;
+        for (vIorb = ai->ports[p].iorb_queue.vRoot; vIorb != FAR16NULL; vIorb = vNext)
+        {
+          IORBH *pIorb = Far16ToFlat(vIorb);
+          ADD_WORKSPACE *aws = add_workspace(pIorb);
+          vNext = pIorb->pNxtIORB;
 
-          if (aws->queued_hw) {
-            if (ai->ports[p].ncq_cmds & (1UL << aws->cmd_slot)) {
+          if (aws->queued_hw)
+          {
+            if (ai->ports[p].ncq_cmds & (1UL << aws->cmd_slot))
+            {
               /* NCQ command; force non-NCQ mode and trigger port reset */
               ai->ports[p].ncq_cmds &= ~(1UL << aws->cmd_slot);
               aws->no_ncq = 1;
               need_reset = 1;
-            } else {
+            }
+            else
+            {
               /* regular command; clear cmd bit and identify problem IORB */
               ai->ports[p].reg_cmds &= ~(1UL << aws->cmd_slot);
-              if (aws->cmd_slot == ccs) {
+              if (aws->cmd_slot == ccs)
+              {
                 /* this is the non-NCQ command that failed */
-                ddprintf("failing IORB: %Fp\n", iorb);
-                problem_iorb = iorb;
+                DPRINTF(0,"failing IORB: %x\n", vIorb);
+                vProblemIorb = vIorb;
               }
             }
             /* we can requeue all IORBs unconditionally (see function comment) */
-            if (aws->retries++ < MAX_RETRIES) {
-              iorb_requeue(iorb);
-
-            } else {
+            if (aws->retries++ < MAX_RETRIES)
+            {
+              iorb_requeue(pIorb);
+            }
+            else
+            {
               /* retry count exceeded; consider IORB aborted */
-              iorb_seterr(iorb, IOERR_CMD_ABORTED);
-              iorb_queue_del(&ai->ports[p].iorb_queue, iorb);
-              iorb_queue_add(&done_queue, iorb);
-              if (iorb == problem_iorb) {
+              iorb_seterr(pIorb, IOERR_CMD_ABORTED);
+              iorb_queue_del(&ai->ports[p].iorb_queue, vIorb);
+              iorb_queue_add(&done_queue, vIorb, pIorb);
+              if (vIorb == vProblemIorb)
+              {
                 /* no further analysis -- we're done with this one */
-                problem_iorb = NULL;
+                vProblemIorb = FAR16NULL;
               }
             }
           }
         }
 
         /* sanity check: issued command bitmaps should be 0 now */
-        if (ai->ports[p].ncq_cmds != 0 || ai->ports[p].reg_cmds != 0) {
-          dprintf("warning: commands issued not 0 (%08lx/%08lx); resetting...\n",
+        if (ai->ports[p].ncq_cmds != 0 || ai->ports[p].reg_cmds != 0)
+        {
+          DPRINTF(0,"warning: commands issued not 0 (%08lx/%08lx); resetting...\n",
                   ai->ports[p].ncq_cmds, ai->ports[p].reg_cmds);
           need_reset = 1;
         }
 
-        if (!need_reset) {
-          if ((readl(port_mmio + PORT_TFDATA) & 0x88) != 0) {
+        if (!need_reset)
+        {
+          if ((readl(port_mmio + PORT_TFDATA) & 0x88) != 0)
+          {
             /* device is not in an idle state */
             need_reset = 1;
           }
@@ -182,9 +205,12 @@ void restart_ctxhook(ULONG parm)
         /* restart/reset port */
         ai->busy = 1;
         spin_unlock(drv_lock);
-        if (need_reset) {
+        if (need_reset)
+        {
           ahci_reset_port(ai, p, 1);
-        } else {
+        }
+        else
+        {
           ahci_stop_port(ai, p);
           ahci_start_port(ai, p, 1);
         }
@@ -196,37 +222,44 @@ void restart_ctxhook(ULONG parm)
         ai->ports[p].reg_cmds = 0;
         ai->ports[p].cmd_slot = 0;
 
-        if (problem_iorb != NULL) {
+        if (vProblemIorb != FAR16NULL)
+        {
+          IORBH *pProblemIorb = Far16ToFlat(vProblemIorb);
           /* get details about the error that caused this IORB to fail */
-          if (need_reset) {
+          if (need_reset)
+          {
             /* no way to retrieve error details after a reset */
-            iorb_seterr(problem_iorb, IOERR_DEVICE_NONSPECIFIC);
-            iorb_queue_del(&ai->ports[p].iorb_queue, problem_iorb);
-            iorb_queue_add(&done_queue, problem_iorb);
+            iorb_seterr(pProblemIorb, IOERR_DEVICE_NONSPECIFIC);
+            iorb_queue_del(&ai->ports[p].iorb_queue, vProblemIorb);
+            iorb_queue_add(&done_queue, vProblemIorb, pProblemIorb);
 
-          } else {
+          }
+          else
+          {
             /* get sense information */
-            ADD_WORKSPACE _far *aws = add_workspace(problem_iorb);
-            int d = iorb_unit_device(problem_iorb);
-            int (*req_sense)(IORBH _far *, int) = (ai->ports[p].devs[d].atapi) ?
+            ADD_WORKSPACE *aws = add_workspace(pProblemIorb);
+            int d = iorb_unit_device(pProblemIorb);
+            int (*req_sense)(IORBH FAR16DATA *, IORBH *, int) = (ai->ports[p].devs[d].atapi) ?
                                                    atapi_req_sense : ata_req_sense;
 
             aws->processing = 1;
             aws->queued_hw = 1;
 
-            if (req_sense(problem_iorb, 0) == 0) {
+            if (req_sense(vProblemIorb, pProblemIorb, 0) == 0)
+            {
               /* execute request sense on slot #0 before anything else comes along */
-              ADD_StartTimerMS(&aws->timer, 5000, (PFN) timeout_callback,
-                               problem_iorb, 0);
+              Timer_StartTimerMS(&aws->timer, 5000, timeout_callback, CastFar16ToULONG(vProblemIorb));
               aws->cmd_slot = 0;
               ai->ports[p].reg_cmds = 1;
               writel(port_mmio + PORT_CMD_ISSUE, 1);
               readl(port_mmio); /* flush */
 
-            } else {
+            }
+            else
+            {
               /* IORB is expected to contain the error code; just move to done queue */
-              iorb_queue_del(&ai->ports[p].iorb_queue, problem_iorb);
-              iorb_queue_add(&done_queue, problem_iorb);
+              iorb_queue_del(&ai->ports[p].iorb_queue, vProblemIorb);
+              iorb_queue_add(&done_queue, vProblemIorb, pProblemIorb);
             }
           }
         }
@@ -237,14 +270,16 @@ void restart_ctxhook(ULONG parm)
   spin_unlock(drv_lock);
 
   /* call notification routine on all IORBs which have completed */
-  for (iorb = done_queue.root; iorb != NULL; iorb = next) {
-    next = iorb->pNxtIORB;
+  for (vIorb = done_queue.vRoot; vIorb != FAR16NULL; vIorb = vNext)
+  {
+    IORBH *pIorb = Far16ToFlat(vIorb);
+    vNext = pIorb->pNxtIORB;
 
     spin_lock(drv_lock);
-    aws_free(add_workspace(iorb));
+    aws_free(add_workspace(pIorb));
     spin_unlock(drv_lock);
 
-    iorb_complete(iorb);
+    iorb_complete(vIorb, pIorb);
   }
 
   /* restart engine to resume IORB processing */
@@ -252,15 +287,17 @@ void restart_ctxhook(ULONG parm)
   trigger_engine();
   spin_unlock(drv_lock);
 
-  dprintf("restart_ctxhook() completed\n");
+  DPRINTF(8,"restart_ctxhook() completed\n");
 
   /* Check whether we have to rearm ourselves because some adapters were busy
    * when we wanted to restart ports on them.
    */
-  if (rearm_ctx_hook) {
+  if (rearm_ctx_hook)
+  {
     msleep(250);
-    DevHelp_ArmCtxHook(0, restart_ctxhook_h);
+    KernArmHook(restart_ctxhook_h, 0, 0);
   }
+  KernThunkStackTo16();
 }
 
 /******************************************************************************
@@ -289,63 +326,77 @@ void restart_ctxhook(ULONG parm)
  * set (aborted, timeout, ...) but must not be marked as 'done'; otherwise,
  * the upstream code might reuse the IORBs before we're done with them.
  */
-void reset_ctxhook(ULONG parm)
+void _Syscall reset_ctxhook(ULONG parm)
 {
   IORB_QUEUE done_queue;
   AD_INFO *ai;
-  IORBH _far *iorb;
-  IORBH _far *next = NULL;
-  int rearm_ctx_hook = 0;
+  IORBH FAR16DATA *vIorb;
+  IORBH FAR16DATA *vNext;
+  int rearm_ctx_hook;
   int a;
   int p;
 
-  dprintf("reset_ctxhook() started\n");
+  D32ThunkStackTo32();
+
+  vNext = FAR16NULL;
+  rearm_ctx_hook = 0;
+
+  DPRINTF(8,"reset_ctxhook() started\n");
   memset(&done_queue, 0x00, sizeof(done_queue));
 
   spin_lock(drv_lock);
 
-  if (th_reset_watchdog != 0) {
+  if (th_reset_watchdog != 0)
+  {
     /* watchdog timer still active -- just reset it */
-    ADD_CancelTimer(th_reset_watchdog);
+    Timer_CancelTimer(th_reset_watchdog);
     th_reset_watchdog = 0;
   }
 
   /* add ports of active IORBs from the abort queue to ports_to_reset[] */
-  for (iorb = abort_queue.root; iorb != NULL; iorb = next) {
-    next = iorb->pNxtIORB;
-    a = iorb_unit_adapter(iorb);
-    p = iorb_unit_port(iorb);
+  for (vIorb = abort_queue.vRoot; vIorb != FAR16NULL; vIorb = vNext)
+  {
+    IORBH *pIorb = Far16ToFlat(vIorb);
+    vNext = pIorb->pNxtIORB;
+    a = iorb_unit_adapter(pIorb);
+    p = iorb_unit_port(pIorb);
     ai = ad_infos + a;
 
-    if (ai->busy) {
+    if (ai->busy)
+    {
       /* this adapter is busy; leave it alone for now */
       rearm_ctx_hook = 1;
       continue;
     }
 
     /* move IORB to the local 'done' queue */
-    iorb_queue_del(&abort_queue, iorb);
-    iorb_queue_add(&done_queue, iorb);
+    iorb_queue_del(&abort_queue, vIorb);
+    iorb_queue_add(&done_queue, vIorb, pIorb);
 
     /* reset port if the IORB has already been queued to hardware */
-    if (add_workspace(iorb)->queued_hw) {
+    if (add_workspace(pIorb)->queued_hw)
+    {
       /* prepare port reset */
       ports_to_reset[a] |= (1UL << p);
     }
   }
 
   /* reset all ports in 'ports_to_reset[]' */
-  for (a = 0; a < ad_info_cnt; a++) {
+  for (a = 0; a < ad_info_cnt; a++)
+  {
     ai = ad_infos + a;
 
-    if (ai->busy) {
+    if (ai->busy)
+    {
       /* this adapter is busy; leave it alone for now */
       rearm_ctx_hook = 1;
       continue;
     }
 
-    for (p = 0; p <= ai->port_max; p++) {
-      if (ports_to_reset[a] & (1UL << p)) {
+    for (p = 0; p <= ai->port_max; p++)
+    {
+      if (ports_to_reset[a] & (1UL << p))
+      {
         ports_to_reset[a] &= ~(1UL << p);
 
         /* Reset this port. Since this is a rather slow operation, we'll
@@ -365,21 +416,27 @@ void reset_ctxhook(ULONG parm)
         ai->ports[p].cmd_slot = 0;
 
         /* retry or abort all remaining active commands on this port */
-        for (iorb = ai->ports[p].iorb_queue.root; iorb != NULL; iorb = next) {
-          ADD_WORKSPACE _far *aws = add_workspace(iorb);
-          next = iorb->pNxtIORB;
+        for (vIorb = ai->ports[p].iorb_queue.vRoot; vIorb != FAR16NULL; vIorb = vNext)
+        {
+          IORBH *pIorb = Far16ToFlat(vIorb);
+          ADD_WORKSPACE *aws = add_workspace(pIorb);
+          vNext = pIorb->pNxtIORB;
 
-          if (aws->queued_hw) {
+          if (aws->queued_hw)
+          {
             /* this IORB had already been queued to HW when we reset the port */
-            if (aws->idempotent && aws->retries++ < MAX_RETRIES) {
+            if (aws->idempotent && aws->retries++ < MAX_RETRIES)
+            {
               /* we can retry this IORB */
-              iorb_requeue(iorb);
+              iorb_requeue(pIorb);
 
-            } else {
+            }
+            else
+            {
               /* we cannot retry this IORB; consider it aborted */
-              iorb->ErrorCode = IOERR_CMD_ABORTED;
-              iorb_queue_del(&ai->ports[p].iorb_queue, iorb);
-              iorb_queue_add(&done_queue, iorb);
+              pIorb->ErrorCode = IOERR_CMD_ABORTED;
+              iorb_queue_del(&ai->ports[p].iorb_queue, vIorb);
+              iorb_queue_add(&done_queue, vIorb, pIorb);
             }
           }
         }
@@ -390,15 +447,17 @@ void reset_ctxhook(ULONG parm)
   spin_unlock(drv_lock);
 
   /* complete all aborted IORBs */
-  for (iorb = done_queue.root; iorb != NULL; iorb = next) {
-    next = iorb->pNxtIORB;
+  for (vIorb = done_queue.vRoot; vIorb != FAR16NULL; vIorb = vNext)
+  {
+    IORBH *pIorb = Far16ToFlat(vIorb);
+    vNext = pIorb->pNxtIORB;
 
     spin_lock(drv_lock);
-    aws_free(add_workspace(iorb));
+    aws_free(add_workspace(pIorb));
     spin_unlock(drv_lock);
 
-    iorb->Status |= IORB_ERROR;
-    iorb_complete(iorb);
+    pIorb->Status |= IORB_ERROR;
+    iorb_complete(vIorb, pIorb);
   }
 
   /* restart engine to resume IORB processing */
@@ -406,15 +465,18 @@ void reset_ctxhook(ULONG parm)
   trigger_engine();
   spin_unlock(drv_lock);
 
-  dprintf("reset_ctxhook() completed\n");
+  DPRINTF(8,"reset_ctxhook() completed\n");
 
   /* Check whether we have to rearm ourselves because some adapters were busy
    * when we wanted to reset ports on them.
    */
-  if (rearm_ctx_hook) {
+  if (rearm_ctx_hook)
+  {
     msleep(250);
-    DevHelp_ArmCtxHook(0, reset_ctxhook_h);
+    KernArmHook(reset_ctxhook_h, 0, 0);
   }
+
+  KernThunkStackTo16();
 }
 
 /******************************************************************************
@@ -423,31 +485,36 @@ void reset_ctxhook(ULONG parm)
  * some condition on the adapter such as being busy. It could also be a very
  * busy system. Either way, this requires some task-time help.
  */
-void engine_ctxhook(ULONG parm)
+void _Syscall engine_ctxhook(ULONG parm)
 {
   int iorbs_sent;
   int i;
 
-  dprintf("engine_ctxhook() started\n");
-  if (resume_sleep_flag) {
+  D32ThunkStackTo32();
+
+  DPRINTF(8,"engine_ctxhook() started\n");
+  if (resume_sleep_flag)
+  {
     msleep(resume_sleep_flag);
     resume_sleep_flag = 0;
   }
 
   spin_lock(drv_lock);
-  for (i = 0; i < 10; i++) {
-    if ((iorbs_sent = trigger_engine_1()) == 0) {
-      break;
-    }
+  for (i = 0; i < 10; i++)
+  {
+    if ((iorbs_sent = trigger_engine_1()) == 0) break;
   }
   spin_unlock(drv_lock);
 
-  dprintf("engine_ctxhook() completed\n");
+  DPRINTF(8,"engine_ctxhook() completed\n");
 
-  if (iorbs_sent != 0) {
+  if (iorbs_sent != 0)
+  {
     /* need to rearm ourselves for another run */
     msleep(250);
-    DevHelp_ArmCtxHook(0, engine_ctxhook_h);
+    KernArmHook(engine_ctxhook_h, 0, 0);
   }
+
+  KernThunkStackTo16();
 }
 
