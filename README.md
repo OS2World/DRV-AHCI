@@ -1,6 +1,5 @@
 DRV-AHCI
 ========
-
 AHCI driver for OS/2-eCS
 
 LICENSE
@@ -14,7 +13,10 @@ COMPILE TOOLS
 AUTHORS
 ===============
 * David Azarewicz
+* Markus Thielen
+* Christian Mueller
 
 LINKS
 ===============
-* http://svn.ecomstation.nl/ahci
+* https://www.arcanoae.com/wiki/ahci/
+* https://www.os2world.com/wiki/index.php/OS2AHCI
